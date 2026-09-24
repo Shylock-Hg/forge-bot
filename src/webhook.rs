@@ -148,7 +148,7 @@ async fn receive(
     };
 
     // Verify and parse.
-    let messages = match adapter.handle(&headers, &body) {
+    let mut messages = match adapter.handle(&headers, &body) {
         Ok(messages) => messages,
         Err(BotError::Verification(reason)) => {
             tracing::warn!(forge = %forge, %reason, "rejected webhook");
@@ -162,6 +162,12 @@ async fn receive(
             );
         }
     };
+
+    // Some forges omit part of an event from the payload; let the adapter fill
+    // it in (Forgejo inline review comments).
+    if let Err(error) = adapter.enrich(&mut messages, &headers, &body).await {
+        tracing::warn!(forge = %forge, %error, "failed to enrich webhook");
+    }
 
     let mut accepted = 0usize;
     tracing::debug!(

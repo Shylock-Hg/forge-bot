@@ -57,7 +57,7 @@ export BOT_URL=http://127.0.0.1:8080/webhooks/forgejo
 export HOOK_BODY='{
   "type": "forgejo",
   "active": true,
-  "events": ["issue_comment", "pull_request_review_comment", "issues", "pull_request"],
+  "events": ["issue_comment", "pull_request_comment", "pull_request_review_comment", "issues", "pull_request"],
   "config": {
     "url": "'"$BOT_URL"'",
     "content_type": "json",
@@ -182,9 +182,16 @@ ones that can carry a mention:
 | Event | Payload | forge-bot status |
 | --- | --- | --- |
 | `issue_comment` | issue + PR conversation comments | handled |
-| `pull_request_review_comment` | inline review comments | handled |
+| `pull_request_comment` | submitted reviews (body + inline comments) | handled |
+| `pull_request_review_comment` | inline review comments (older Forgejo) | handled |
 | `issues` | issue opened/edited (description) | handled |
 | `pull_request` | PR opened/edited (description) | handled |
+
+Forgejo's `pull_request_comment` payload only carries the review body; it does
+not inline the individual review comments. When the bot sees a review it
+fetches the newest review's comments through the API to find mentions in them,
+so the token needs read access to the repository. `pull_request_review_comment`
+is kept for Forgejo versions that inline the comment.
 
 Description events are deduplicated by a hash of the body, so an edit that
 changes the text triggers once while re-deliveries of the same text are

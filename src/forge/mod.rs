@@ -131,6 +131,22 @@ pub trait ForgeAdapter: Send + Sync {
         self.verify(headers, body)?;
         self.parse(headers, body)
     }
+
+    /// Add messages that the raw delivery does not carry.
+    ///
+    /// A forge may omit part of an event from the webhook payload. Forgejo, for
+    /// example, signals a pull-request review with `pull_request_comment` but
+    /// does not inline the review's comments, so the only way to see an inline
+    /// review comment mention is to fetch it through the API. The default
+    /// implementation adds nothing.
+    async fn enrich(
+        &self,
+        _messages: &mut Vec<ForgeMessage>,
+        _headers: &HeaderMap,
+        _body: &[u8],
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Compute the lowercase hex HMAC-SHA256 of `body` using `secret`.

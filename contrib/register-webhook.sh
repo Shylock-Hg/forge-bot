@@ -25,8 +25,8 @@
 #   HOOK_ID                 Update this existing hook (PATCH) instead of
 #                           creating a new one
 #
-# Default events: ["issue_comment", "pull_request_review_comment", "issues",
-#                  "pull_request"]
+# Default events: ["issue_comment", "pull_request_comment", "issues",
+#                  "pull_request", "pull_request_review_comment"]
 #
 # Scope requirements (scope + role):
 #   user    write:user (covers every repository owned by the token's user)
@@ -44,7 +44,7 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCOPE="${SCOPE:-user}"
 FORGEJO_URL="${FORGEJO_URL:-http://127.0.0.1:3000}"
 BOT_URL="${BOT_URL:-http://127.0.0.1:8080/webhooks/forgejo}"
-EVENTS="${EVENTS:-[\"issue_comment\",\"pull_request_review_comment\",\"issues\",\"pull_request\"]}"
+EVENTS="${EVENTS:-[\"issue_comment\",\"pull_request_comment\",\"issues\",\"pull_request\",\"pull_request_review_comment\"]}"
 HOOK_ID="${HOOK_ID:-}"
 
 case "$SCOPE" in

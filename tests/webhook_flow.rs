@@ -136,6 +136,55 @@ async fn accepts_signed_mention_and_runs_agent() {
     );
 }
 
+const REVIEW_PAYLOAD: &str = r#"{
+    "action": "reviewed",
+    "number": 16,
+    "pull_request": {
+        "number": 16,
+        "title": "feat: something",
+        "body": "This closes #5.",
+        "html_url": "http://forge.local:3000/shylock/forge-bot/pulls/16"
+    },
+    "review": {"type": "pull_request_review_comment", "content": "@agent:custom review this please"},
+    "repository": {"full_name": "shylock/forge-bot"},
+    "sender": {"login": "shylock"}
+}"#;
+
+#[tokio::test]
+async fn handles_pull_request_review_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(signed_request("pull_request_comment", REVIEW_PAYLOAD))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    for _ in 0..200 {
+        if harness.sessions.pending_jobs().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let session = harness
+        .sessions
+        .get("forgejo:shylock/forge-bot:pr:16")
+        .expect("review session should exist");
+    assert_eq!(session.runs.len(), 1);
+    assert_eq!(session.runs[0].success, Some(true));
+    assert!(
+        session.runs[0]
+            .summary
+            .as_deref()
+            .unwrap()
+            .contains("review this please")
+    );
+}
+
 #[tokio::test]
 async fn rejects_bad_signature() {
     let dir = tempfile::tempdir().unwrap();
