@@ -92,7 +92,7 @@ Implemented:
 - [x] Location URL + message extraction
 - [x] Codex adapter
 - [x] Pi / Kimi / Claude Code adapters
-- [x] Auto-approve by default: codex bypasses its sandbox, claude skips permission checks, pi trusts project files; opt out per adapter with `dangerously_skip_permissions = false`
+- [x] Auto-approve: codex always bypasses its sandbox; claude skips permission checks and pi trusts project files by default (`dangerously_skip_permissions = false` opts those two out)
 - [x] Long-lived Pi RPC agent pool (`pi-rpc`): reuses an idle agent, spawns one when all are busy
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Bounded job queue + on-disk session/job persistence

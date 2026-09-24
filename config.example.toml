@@ -70,14 +70,13 @@ recover = true
 # `timeout_secs = 0` disables the wall-clock limit, so an agent is allowed to
 # run to completion instead of being killed when a timer expires.
 #
-# Agents run with auto-approve by default (issue #33): codex gets
-# `--dangerously-bypass-approvals-and-sandbox`, claude
-# `--dangerously-skip-permissions`, and pi `--approve`. Set
-# `dangerously_skip_permissions = false` on an adapter to opt out.
+# Agents run with auto-approve (issue #33): codex always bypasses its
+# sandbox; claude gets `--dangerously-skip-permissions` and pi `--approve`
+# by default. Set `dangerously_skip_permissions = false` on claude/pi to
+# opt out.
 
 [agents.codex]
 timeout_secs = 0
-# dangerously_skip_permissions = false  # opt out of auto-approve
 
 [agents.pi]
 command = "pi"
