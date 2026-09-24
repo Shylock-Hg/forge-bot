@@ -72,9 +72,6 @@ pub const DEFAULT_CAPACITY_MARKERS: &[&str] = &[
     "maximum concurrent",
     "session limit",
     "max sessions",
-    // The bot's own pooled adapter exhausting its idle agents.
-    "timed out waiting for an idle",
-    "waiting for an idle agent",
     // Generic transient "try later" hint; harmless because it is only checked
     // on a failed run.
     "try again later",
@@ -133,10 +130,18 @@ mod tests {
             "you have exceeded the maximum number of concurrent requests",
             &[]
         ));
-        assert!(is_capacity_limited(
+    }
+
+    #[test]
+    fn does_not_treat_pool_exhaustion_as_provider_capacity() {
+        // The pooled adapter waiting for one of its own agents is a busy
+        // gateway, not the provider refusing work, so it must not mark the
+        // agent unavailable.
+        assert!(!is_capacity_limited(
             "timed out waiting for an idle pi agent",
             &[]
         ));
+        assert!(!is_capacity_limited("waiting for an idle agent", &[]));
     }
 
     #[test]
