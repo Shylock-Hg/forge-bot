@@ -105,9 +105,6 @@ impl Config {
         if self.pi_rpc.max_agents == 0 {
             self.pi_rpc.max_agents = 1;
         }
-        if self.pi_rpc.timeout_secs == 0 {
-            self.pi_rpc.timeout_secs = 1800;
-        }
         if self.poller.interval_secs == 0 {
             self.poller.interval_secs = 15;
         }
@@ -519,7 +516,9 @@ pub struct PiRpcConfig {
     pub max_agents: usize,
     /// Kill an unused agent after this many seconds.
     pub idle_ttl_secs: u64,
-    /// Maximum runtime of a single request.
+    /// Wall-clock limit for a single request, in seconds. `0` disables the
+    /// limit entirely, so an agent runs until it settles or its process exits;
+    /// the gateway never kills a working agent just because a timer expired.
     pub timeout_secs: u64,
     /// Pass `--approve` so project-local files are trusted.
     pub approve: bool,
@@ -540,7 +539,7 @@ impl Default for PiRpcConfig {
             args: Vec::new(),
             max_agents: 2,
             idle_ttl_secs: 900,
-            timeout_secs: 1800,
+            timeout_secs: 0,
             approve: true,
             no_session: true,
             model: None,

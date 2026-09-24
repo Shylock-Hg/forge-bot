@@ -150,19 +150,23 @@ impl PiRpcClient {
         }
     }
 
-    async fn next_record_before(&mut self, deadline: Instant) -> Result<Value> {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| self.timeout_error())?;
-        match tokio::time::timeout(remaining, self.next_record()).await {
-            Err(_) => Err(self.timeout_error()),
-            Ok(Ok(Some(record))) => Ok(record),
-            Ok(Ok(None)) => Err(BotError::Agent {
-                name: "pi-rpc".into(),
-                reason: "pi exited before the run settled".into(),
-            }),
-            Ok(Err(error)) => Err(error),
-        }
+    async fn next_record_before(&mut self, deadline: Option<Instant>) -> Result<Value> {
+        let record = match deadline {
+            Some(deadline) => {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| self.timeout_error())?;
+                match tokio::time::timeout(remaining, self.next_record()).await {
+                    Err(_) => return Err(self.timeout_error()),
+                    Ok(result) => result?,
+                }
+            }
+            None => self.next_record().await?,
+        };
+        record.ok_or_else(|| BotError::Agent {
+            name: "pi-rpc".into(),
+            reason: "pi exited before the run settled".into(),
+        })
     }
 
     fn timeout_error(&self) -> BotError {
@@ -173,9 +177,10 @@ impl PiRpcClient {
     }
 
     /// Send a prompt and wait until `agent_settled`, returning the assistant's
-    /// final text.
-    pub async fn prompt(&mut self, message: &str, timeout: Duration) -> Result<String> {
-        let deadline = Instant::now() + timeout;
+    /// final text. When `timeout` is `None` the wait is unbounded: the call
+    /// only returns once the agent settles or its process exits.
+    pub async fn prompt(&mut self, message: &str, timeout: Option<Duration>) -> Result<String> {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let request_id = self.next_request_id();
         self.send(&json!({
             "id": request_id,
@@ -222,7 +227,10 @@ impl PiRpcClient {
         }
     }
 
-    async fn get_last_assistant_text(&mut self, deadline: Instant) -> Result<Option<String>> {
+    async fn get_last_assistant_text(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<Option<String>> {
         let request_id = self.next_request_id();
         self.send(&json!({
             "id": request_id,
@@ -322,7 +330,8 @@ impl PoolInner {
         workspace: &Path,
         credentials: &[(String, String)],
     ) -> Result<PoolGuard> {
-        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_secs.max(60));
+        let deadline = (self.config.timeout_secs != 0)
+            .then(|| Instant::now() + Duration::from_secs(self.config.timeout_secs));
 
         loop {
             {
@@ -373,20 +382,26 @@ impl PoolInner {
                 }
             }
 
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| BotError::Agent {
-                    name: "pi-rpc".into(),
-                    reason: "timed out waiting for an idle pi agent".into(),
-                })?;
-            if tokio::time::timeout(remaining, self.notify.notified())
-                .await
-                .is_err()
-            {
-                return Err(BotError::Agent {
-                    name: "pi-rpc".into(),
-                    reason: "timed out waiting for an idle pi agent".into(),
-                });
+            match deadline {
+                Some(deadline) => {
+                    let remaining =
+                        deadline
+                            .checked_duration_since(Instant::now())
+                            .ok_or_else(|| BotError::Agent {
+                                name: "pi-rpc".into(),
+                                reason: "timed out waiting for an idle pi agent".into(),
+                            })?;
+                    if tokio::time::timeout(remaining, self.notify.notified())
+                        .await
+                        .is_err()
+                    {
+                        return Err(BotError::Agent {
+                            name: "pi-rpc".into(),
+                            reason: "timed out waiting for an idle pi agent".into(),
+                        });
+                    }
+                }
+                None => self.notify.notified().await,
             }
         }
     }
@@ -504,7 +519,8 @@ impl Agent for PiPoolAgent {
             .acquire(&key, &context.workspace, &context.credentials)
             .await?;
         let prompt = build_prompt(request, context);
-        let timeout = Duration::from_secs(self.inner.config.timeout_secs.max(1));
+        let timeout = (self.inner.config.timeout_secs != 0)
+            .then(|| Duration::from_secs(self.inner.config.timeout_secs));
 
         match guard.client_mut()?.prompt(&prompt, timeout).await {
             Ok(text) => Ok(AgentOutcome::success(text, started.elapsed())),
@@ -757,6 +773,45 @@ for line in sys.stdin:
         assert!(second.await.unwrap().unwrap().success);
         assert_eq!(agent.live_agents(), 1);
         assert_eq!(agent.conversation_binding(&key), Some(bound));
+    }
+
+    #[tokio::test]
+    async fn disabled_timeout_lets_a_slow_agent_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 1,
+            timeout_secs: 0,
+            ..Default::default()
+        };
+        config.env.insert("FAKE_PI_DELAY".into(), "1".into());
+        let agent = PiPoolAgent::new(&config);
+
+        let request = AgentRequest {
+            location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),
+            message: "go".into(),
+        };
+        let context = AgentContext {
+            workspace: dir.path().to_path_buf(),
+            forge: Some(ForgeKind::Forgejo),
+            repository: "o/r".into(),
+            issue_number: Some(1),
+            ..Default::default()
+        };
+
+        // With the limit disabled the run has no deadline and must wait for
+        // the fake agent to settle instead of failing.
+        let outcome = agent.run(&request, &context).await.unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.summary, "fake-result");
     }
 
     #[test]

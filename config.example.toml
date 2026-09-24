@@ -102,7 +102,9 @@ timeout_secs = 1800
 command = "pi"
 max_agents = 2
 idle_ttl_secs = 900
-timeout_secs = 1800
+# Wall-clock limit for a single request. 0 disables the limit so an agent
+# runs to completion instead of being killed when a timer expires.
+timeout_secs = 0
 approve = true
 no_session = true
 # model = "deepseek-flash"
