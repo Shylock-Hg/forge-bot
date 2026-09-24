@@ -1,0 +1,30 @@
+[Unit]
+Description=forge-bot — forge @mention bridge (user service)
+Documentation=https://forgejo.shylockhg.me/shylock/forge-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.config/forge-bot
+EnvironmentFile=-%h/.config/forge-bot/forge-bot.env
+ExecStart=%h/.local/bin/forge-bot --config %h/.config/forge-bot/forge-bot.toml serve
+Restart=on-failure
+RestartSec=5s
+
+# Run as the invoking user only. A user unit has no system-wide reach and can
+# never start or signal processes owned by another account; the options below
+# are defense in depth on top of that boundary.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

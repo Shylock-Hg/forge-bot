@@ -96,6 +96,7 @@ Implemented:
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Bounded job queue + on-disk session/job persistence
 - [x] GitHub and GitLab adapters
+- [x] Per-user systemd service (no root) plus a hardened system-wide unit for a dedicated account
 - [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
 
 Still open (see the issue's roadmap):
@@ -123,7 +124,13 @@ cargo run -- poll
 
 For a full deployment walkthrough — registering the Forgejo webhook, running
 as a service, secrets, verification and troubleshooting — see
-[`deploy.md`](deploy.md).
+[`deploy.md`](deploy.md). The recommended way to run it is the per-user
+systemd service, which needs no root and cannot touch other accounts:
+
+```bash
+cargo build --release
+./contrib/install-user.sh      # systemctl --user status forge-bot
+```
 
 Secrets can be supplied through the environment instead of the file:
 
