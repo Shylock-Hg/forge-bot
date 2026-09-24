@@ -164,6 +164,12 @@ async fn receive(
     };
 
     let mut accepted = 0usize;
+    tracing::debug!(
+        forge = %forge,
+        event = %adapter.event(&headers),
+        messages = messages.len(),
+        "webhook received"
+    );
     for message in messages {
         // Never react to our own comments.
         if state.dispatcher.policy().is_ignored(&message.author) {
