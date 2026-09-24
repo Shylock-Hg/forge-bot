@@ -7,12 +7,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest};
+use crate::agent::session::SessionStore;
+use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PromptDelivery;
 use crate::error::{BotError, Result};
 use crate::forge::ReplyTarget;
@@ -30,6 +32,73 @@ pub struct CommandAgent {
     timeout: Option<Duration>,
     env: BTreeMap<String, String>,
     dangerously_skip_permissions: bool,
+    session: Option<SessionContinuation>,
+}
+
+/// How a [`CommandAgent`] continues the conversation for one thread.
+#[derive(Debug, Clone)]
+pub struct SessionContinuation {
+    store: Arc<SessionStore>,
+    style: SessionStyle,
+}
+
+/// Per-adapter rules for resuming a backend conversation.
+///
+/// `{session}` is replaced with the backend session id and `{reply_file}` with
+/// a scratch file the CLI may write its final message to.
+#[derive(Debug, Clone)]
+pub struct SessionStyle {
+    /// Args appended when starting a new conversation.
+    pub create_args: Vec<String>,
+    /// Args used for a later comment in the same conversation.
+    pub resume_args: Vec<String>,
+    /// Where `resume_args` are inserted into the base args; `None` appends.
+    pub resume_at: Option<usize>,
+    /// Read `{reply_file}` for the reply instead of stdout.
+    pub reply_from_file: bool,
+    /// Discover the new session id in `--json` output (`codex`).
+    pub capture_id: bool,
+}
+
+/// Resolved session arguments for one invocation.
+#[derive(Debug, Default)]
+struct SessionPlan {
+    /// Extra args to add to the base argument list.
+    args: Vec<String>,
+    /// Insert `args` at this index; `None` appends.
+    at: Option<usize>,
+    /// Scratch file the CLI writes its final message to.
+    reply_file: Option<PathBuf>,
+    /// `(conversation, id)` to remember when the id is known up front.
+    persist: Option<(String, String)>,
+    /// Conversation whose captured id should be remembered on success.
+    capture: Option<String>,
+}
+
+/// Substitute `{session}` / `{reply_file}` into a session arg template.
+fn interpolate(template: &[String], session: &str, reply: Option<&str>) -> Vec<String> {
+    template
+        .iter()
+        .map(|arg| {
+            arg.replace("{session}", session)
+                .replace("{reply_file}", reply.unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Extract the `thread_id` from a codex `--json` JSONL stream.
+fn parse_thread_id(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if value["type"] == "thread.started"
+            && let Some(id) = value["thread_id"].as_str()
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
 }
 
 impl CommandAgent {
@@ -42,6 +111,7 @@ impl CommandAgent {
             timeout: None,
             env: BTreeMap::new(),
             dangerously_skip_permissions: false,
+            session: None,
         }
     }
 
@@ -96,6 +166,70 @@ impl CommandAgent {
     pub fn dangerously_skip_permissions(mut self, yes: bool) -> Self {
         self.dangerously_skip_permissions = yes;
         self
+    }
+
+    /// Reuse one backend conversation per thread. `store` persists the
+    /// backend session id so the next comment resumes the same context.
+    pub fn session(mut self, style: SessionStyle, store: Arc<SessionStore>) -> Self {
+        self.session = Some(SessionContinuation { store, style });
+        self
+    }
+
+    /// Resolve the session arguments for one request.
+    fn session_plan(&self, context: &AgentContext) -> SessionPlan {
+        let Some(continuation) = &self.session else {
+            return SessionPlan::default();
+        };
+        let style = &continuation.style;
+        let key = conversation_key(context);
+        let reply_file = style.reply_from_file.then(|| {
+            std::env::temp_dir().join(format!("forge-bot-reply-{}.txt", uuid::Uuid::new_v4()))
+        });
+        let reply = reply_file
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+
+        let mut plan = SessionPlan {
+            reply_file,
+            ..Default::default()
+        };
+
+        match continuation.store.get(&self.name, &key) {
+            Some(id) => {
+                plan.args = interpolate(&style.resume_args, &id, reply.as_deref());
+                plan.at = style.resume_at;
+            }
+            None => {
+                let id = if style.capture_id {
+                    String::new()
+                } else {
+                    continuation.store.deterministic_id(&self.name, &key)
+                };
+                plan.args = interpolate(&style.create_args, &id, reply.as_deref());
+                plan.at = None;
+                if style.capture_id {
+                    plan.capture = Some(key);
+                } else {
+                    plan.persist = Some((key, id));
+                }
+            }
+        }
+        plan
+    }
+
+    /// Remember the backend session id after a successful run.
+    fn record_session(&self, plan: &SessionPlan, stdout: &str) {
+        let Some(continuation) = &self.session else {
+            return;
+        };
+        if let Some((key, id)) = &plan.persist {
+            continuation.store.set(&self.name, key, id);
+        }
+        if let Some(key) = &plan.capture
+            && let Some(id) = parse_thread_id(stdout)
+        {
+            continuation.store.set(&self.name, key, &id);
+        }
     }
 
     pub fn dangerously_skip_permissions_enabled(&self) -> bool {
@@ -190,9 +324,20 @@ impl Agent for CommandAgent {
 
         let prompt = self.prompt_text(request, context);
         let started = Instant::now();
+        let plan = self.session_plan(context);
+        let mut args = self.args.clone();
+        match plan.at {
+            Some(at) => {
+                let at = at.min(args.len());
+                for (offset, arg) in plan.args.iter().enumerate() {
+                    args.insert(at + offset, arg.clone());
+                }
+            }
+            None => args.extend(plan.args.iter().cloned()),
+        }
 
         let mut cmd = Command::new(&self.program);
-        cmd.args(&self.args)
+        cmd.args(&args)
             .envs(self.env.clone())
             .envs(context.environment(request))
             .stdin(if self.prompt == PromptDelivery::Stdin {
@@ -273,11 +418,28 @@ impl Agent for CommandAgent {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let summary = summarize(&stdout, &stderr);
+                let fallback = summarize(&stdout, &stderr);
 
                 if output.status.success() {
+                    let summary = match &plan.reply_file {
+                        Some(path) => {
+                            let text = std::fs::read_to_string(path).unwrap_or_default();
+                            let _ = std::fs::remove_file(path);
+                            let text = text.trim();
+                            if text.is_empty() {
+                                fallback
+                            } else {
+                                text.to_owned()
+                            }
+                        }
+                        None => fallback,
+                    };
+                    self.record_session(&plan, &stdout);
                     Ok(AgentOutcome::success(summary, started.elapsed()))
                 } else {
+                    if let Some(path) = &plan.reply_file {
+                        let _ = std::fs::remove_file(path);
+                    }
                     Ok(AgentOutcome::failure(
                         format!(
                             "agent exited with {}: {}",
@@ -286,7 +448,7 @@ impl Agent for CommandAgent {
                                 .code()
                                 .map(|c| c.to_string())
                                 .unwrap_or_else(|| "signal".into()),
-                            summary
+                            fallback
                         ),
                         started.elapsed(),
                     ))
@@ -416,5 +578,139 @@ mod tests {
         let outcome = agent.run(&request, &AgentContext::default()).await.unwrap();
         assert!(outcome.success);
         assert!(outcome.summary.contains("done"));
+    }
+
+    #[cfg(unix)]
+    fn write_executable(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn context_for(dir: &std::path::Path) -> AgentContext {
+        AgentContext {
+            workspace: dir.to_path_buf(),
+            repository: "o/r".into(),
+            issue_number: Some(1),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sessions_are_created_then_resumed_per_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_executable(
+            dir.path(),
+            "fake.sh",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\ncat >/dev/null\necho REPLY\n",
+        );
+        let log = dir.path().join("args.log");
+        let store = Arc::new(SessionStore::load(dir.path()));
+        let agent = CommandAgent::new("fake", script.display().to_string())
+            .env("FAKE_LOG", log.display().to_string())
+            .session(
+                SessionStyle {
+                    create_args: vec!["--session-id".into(), "{session}".into()],
+                    resume_args: vec!["--resume".into(), "{session}".into()],
+                    resume_at: None,
+                    reply_from_file: false,
+                    capture_id: false,
+                },
+                Arc::clone(&store),
+            );
+        let request = AgentRequest {
+            location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),
+            message: "go".into(),
+        };
+        let context = context_for(dir.path());
+
+        assert!(agent.run(&request, &context).await.unwrap().success);
+        assert!(agent.run(&request, &context).await.unwrap().success);
+
+        let logged = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(lines.len(), 2, "{logged}");
+        let id = lines[0]
+            .strip_prefix("--session-id ")
+            .expect("first run creates the session");
+        assert_eq!(lines[1], format!("--resume {id}"));
+
+        // A different conversation gets its own session.
+        let other = AgentContext {
+            issue_number: Some(2),
+            ..context_for(dir.path())
+        };
+        assert!(agent.run(&request, &other).await.unwrap().success);
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(logged.lines().last().unwrap().starts_with("--session-id "));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_thread_id_is_captured_and_resumed() {
+        const FAKE_CODEX: &str = r#"#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+out = None
+for i, a in enumerate(args):
+    if a == "-o":
+        out = args[i + 1]
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(" ".join(args) + "\n")
+sys.stdin.read()
+print('{"type":"thread.started","thread_id":"tid-123"}')
+if out:
+    with open(out, "w") as f:
+        f.write("CODEX-REPLY")
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_executable(dir.path(), "fake_codex.py", FAKE_CODEX);
+        let log = dir.path().join("args.log");
+        let store = Arc::new(SessionStore::load(dir.path()));
+        let agent = CommandAgent::new("codex", script.display().to_string())
+            .arg("exec")
+            .env("FAKE_LOG", log.display().to_string())
+            .session(
+                SessionStyle {
+                    create_args: vec!["--json".into(), "-o".into(), "{reply_file}".into()],
+                    resume_args: vec![
+                        "resume".into(),
+                        "{session}".into(),
+                        "-o".into(),
+                        "{reply_file}".into(),
+                    ],
+                    resume_at: Some(1),
+                    reply_from_file: true,
+                    capture_id: true,
+                },
+                Arc::clone(&store),
+            );
+        let request = AgentRequest {
+            location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),
+            message: "go".into(),
+        };
+        let context = context_for(dir.path());
+
+        let first = agent.run(&request, &context).await.unwrap();
+        assert!(first.success);
+        assert_eq!(first.summary, "CODEX-REPLY");
+        assert_eq!(store.get("codex", "o/r:1"), Some("tid-123".to_string()));
+
+        let second = agent.run(&request, &context).await.unwrap();
+        assert!(second.success);
+        assert_eq!(second.summary, "CODEX-REPLY");
+
+        let logged = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(lines.len(), 2, "{logged}");
+        assert!(lines[0].starts_with("exec --json -o "), "{}", lines[0]);
+        assert!(
+            lines[1].starts_with("exec resume tid-123 -o "),
+            "{}",
+            lines[1]
+        );
     }
 }

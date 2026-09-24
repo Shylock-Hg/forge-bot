@@ -18,7 +18,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest};
+use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PiRpcConfig;
 use crate::error::{BotError, Result};
 
@@ -529,39 +529,6 @@ impl Agent for PiPoolAgent {
                 Ok(AgentOutcome::failure(error.to_string(), started.elapsed()))
             }
         }
-    }
-}
-
-/// Stable conversation key used to pin one thread to one agent instance.
-///
-/// A pull request is folded onto the issue it closes when the description
-/// references one, so both threads share an agent. This is internal routing
-/// data and is deliberately never rendered into the prompt.
-fn conversation_key(context: &AgentContext) -> String {
-    if context.repository.is_empty() {
-        return context.workspace.to_string_lossy().into_owned();
-    }
-    // A pull request folds onto the issue it closes. When that issue is in
-    // another repository, use its owner/repo so the two threads share a key.
-    let (repository, number) = if context.is_pull_request {
-        match &context.linked_issue {
-            Some(linked) => (
-                linked.repository.as_deref().unwrap_or(&context.repository),
-                Some(linked.number),
-            ),
-            None => (context.repository.as_str(), context.issue_number),
-        }
-    } else {
-        (context.repository.as_str(), context.issue_number)
-    };
-    match context.forge {
-        Some(forge) => format!(
-            "{}:{}:{}",
-            forge.as_str(),
-            repository,
-            number.unwrap_or_default()
-        ),
-        None => format!("{repository}:{}", number.unwrap_or_default()),
     }
 }
 

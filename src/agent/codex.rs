@@ -5,8 +5,15 @@
 //! so the adapter also selects a sandbox: `workspace-write` by default, which
 //! lets the agent edit the checkout, or a full bypass when the operator opts in
 //! with `dangerously_skip_permissions = true`.
+//!
+//! Codex persists each conversation under a `thread_id`. A later comment in the
+//! same thread resumes it with `codex exec resume <id>`, which keeps the model
+//! context (and the provider's prompt cache) warm.
 
-use crate::agent::command::CommandAgent;
+use std::sync::Arc;
+
+use crate::agent::command::{CommandAgent, SessionStyle};
+use crate::agent::session::SessionStore;
 use crate::config::{AgentConfig, PromptDelivery};
 
 /// Built-in Codex adapter defaults.
@@ -17,8 +24,24 @@ pub fn default_agent() -> CommandAgent {
 }
 
 /// Build a Codex adapter, applying user overrides.
-pub fn build(config: &AgentConfig) -> CommandAgent {
-    let agent = default_agent().apply_config(config);
+pub fn build(config: &AgentConfig, sessions: Arc<SessionStore>) -> CommandAgent {
+    let agent = default_agent().apply_config(config).session(
+        SessionStyle {
+            // A fresh conversation reports its id on stdout as `thread.started`
+            // and writes the final message to `-o`.
+            create_args: vec!["--json".into(), "-o".into(), "{reply_file}".into()],
+            resume_args: vec![
+                "resume".into(),
+                "{session}".into(),
+                "-o".into(),
+                "{reply_file}".into(),
+            ],
+            resume_at: Some(1),
+            reply_from_file: true,
+            capture_id: true,
+        },
+        sessions,
+    );
     if agent.dangerously_skip_permissions_enabled() {
         agent.arg("--dangerously-bypass-approvals-and-sandbox")
     } else {
@@ -30,6 +53,10 @@ pub fn build(config: &AgentConfig) -> CommandAgent {
 mod tests {
     use super::*;
     use crate::agent::Agent;
+
+    fn store() -> Arc<SessionStore> {
+        Arc::new(SessionStore::default())
+    }
 
     #[test]
     fn defaults_use_codex_exec_with_stdin_prompt() {
@@ -44,7 +71,7 @@ mod tests {
 
     #[test]
     fn enables_workspace_write_sandbox_by_default() {
-        let agent = build(&AgentConfig::default());
+        let agent = build(&AgentConfig::default(), store());
         assert!(agent.arguments().iter().any(|a| a == "--sandbox"));
         assert!(agent.arguments().iter().any(|a| a == "workspace-write"));
         assert!(
@@ -61,7 +88,7 @@ mod tests {
             dangerously_skip_permissions: Some(true),
             ..Default::default()
         };
-        let agent = build(&config);
+        let agent = build(&config, store());
         assert!(
             agent
                 .arguments()
@@ -77,7 +104,7 @@ mod tests {
             args: Some(vec!["exec".into(), "-".into()]),
             ..Default::default()
         };
-        let agent = build(&config);
+        let agent = build(&config, store());
         assert_eq!(&agent.arguments()[..2], ["exec", "-"]);
         assert!(agent.arguments().iter().any(|a| a == "workspace-write"));
     }

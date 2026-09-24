@@ -41,14 +41,29 @@ impl AgentRegistry {
 
         let overrides = &config.agents.overrides;
 
+        // One backend session per `(agent, conversation)` so a later comment
+        // in the same thread resumes the same context instead of cold-starting.
+        let sessions = Arc::new(crate::agent::session::SessionStore::load(
+            &crate::config::expand_tilde(&config.session.dir),
+        ));
+
         let codex_cfg = overrides.get("codex").cloned().unwrap_or_default();
-        agents.insert("codex".into(), Arc::new(codex::build(&codex_cfg)));
+        agents.insert(
+            "codex".into(),
+            Arc::new(codex::build(&codex_cfg, Arc::clone(&sessions))),
+        );
 
         let pi_cfg = overrides.get("pi").cloned().unwrap_or_default();
-        agents.insert("pi".into(), Arc::new(pi::build(&pi_cfg)));
+        agents.insert(
+            "pi".into(),
+            Arc::new(pi::build(&pi_cfg, Arc::clone(&sessions))),
+        );
 
         let claude_cfg = overrides.get("claude").cloned().unwrap_or_default();
-        agents.insert("claude".into(), Arc::new(claude::build(&claude_cfg)));
+        agents.insert(
+            "claude".into(),
+            Arc::new(claude::build(&claude_cfg, Arc::clone(&sessions))),
+        );
 
         let kimi_cfg = overrides.get("kimi").cloned().unwrap_or_default();
         agents.insert("kimi".into(), Arc::new(kimi::build(&kimi_cfg)));
