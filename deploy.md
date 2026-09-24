@@ -14,6 +14,7 @@ supporting files live in [`contrib/`](contrib/):
 | File | Purpose |
 | --- | --- |
 | `config.example.toml` (repo root) | Annotated configuration reference |
+| [`doc/forgejo-webhook.md`](doc/forgejo-webhook.md) | Hook scopes, events and API examples |
 | `contrib/forge-bot.service` | systemd unit |
 | `contrib/forge-bot.env.example` | Environment/secret template |
 | `contrib/install.sh` | Install binary + config + unit, enable the service |
@@ -83,7 +84,9 @@ export FORGEJO_WEBHOOK_SECRET=...
 ```
 
 `REPO` defaults to the repository of the current git remote; set
-`REPO=owner/repo` to target a different one. Then set
+`REPO=owner/repo` to target a different one. For organization, user (all of a
+user's repositories) and system (whole instance) hooks, see
+[`doc/forgejo-webhook.md`](doc/forgejo-webhook.md). Then set
 `[poller] enabled = false`. If Forgejo refuses to deliver to loopback, add
 `127.0.0.1` to `[webhook] ALLOWED_HOST_LIST` in `app.ini`, or keep the poller
 enabled instead. A collaborator token cannot create hooks — use the poller in

@@ -156,12 +156,13 @@ values.
 
 ## Wiring a Forgejo webhook
 
-1. In the repository/org settings open **Webhooks → Add webhook → Forgejo**.
-2. Target URL: `http://<host>:8080/webhooks/forgejo`.
-3. Secret: the same value as `FORGEJO_WEBHOOK_SECRET`.
-4. Events: **Issue comments** (and **Pull request comments** if available).
-5. Give the bot user a token with `write:issue` / `write:repository` scope and
-   set it as `FORGEJO_TOKEN`.
+See [`doc/forgejo-webhook.md`](doc/forgejo-webhook.md) for the full guide
+(repository / organization / user / system scopes, events, API examples, the
+loopback caveat, and verification).
+
+Quick repository hook: **Settings → Webhooks → Add webhook → Forgejo**, target
+`http://<host>:8080/webhooks/forgejo`, secret = `FORGEJO_WEBHOOK_SECRET`, event
+**Issue comments**.
 
 The endpoint also accepts GitHub (`/webhooks/github`) and GitLab
 (`/webhooks/gitlab`) webhooks, selected by URL path.
