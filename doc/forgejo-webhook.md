@@ -89,7 +89,23 @@ curl -X POST \
 ```
 
 The helper [`contrib/register-webhook.sh`](../contrib/register-webhook.sh)
-does this and defaults `REPO` to the current git remote.
+does this for any scope, defaulting `REPO` to the current git remote:
+
+```bash
+# repository (default)
+./contrib/register-webhook.sh
+
+# every repository owned by the token's user
+SCOPE=user ./contrib/register-webhook.sh
+
+# every repository in an organization
+SCOPE=org ORG=my-org ./contrib/register-webhook.sh
+
+# whole instance (instance-admin token)
+SCOPE=system ./contrib/register-webhook.sh
+```
+
+It prints the required scope/role when the request is rejected.
 
 ## 2. Organization webhook
 
