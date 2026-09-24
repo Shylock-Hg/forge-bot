@@ -2,9 +2,10 @@
 //!
 //! `codex exec` runs non-interactively and reads the prompt from stdin when no
 //! prompt argument is given. There is no terminal to answer approval prompts,
-//! so the adapter also selects a sandbox: `workspace-write` by default, which
-//! lets the agent edit the checkout, or a full bypass when the operator opts in
-//! with `dangerously_skip_permissions = true`.
+//! so the adapter runs without the sandbox by default (issue #33); the Linux
+//! sandbox needs `bwrap`, which is unavailable on some hosts. An operator can
+//! opt back into the `workspace-write` sandbox with
+//! `dangerously_skip_permissions = false`.
 
 use crate::agent::command::CommandAgent;
 use crate::config::{AgentConfig, PromptDelivery};
@@ -18,8 +19,11 @@ pub fn default_agent() -> CommandAgent {
 
 /// Build a Codex adapter, applying user overrides.
 pub fn build(config: &AgentConfig) -> CommandAgent {
-    let agent = default_agent().apply_config(config);
-    if agent.dangerously_skip_permissions_enabled() {
+    let auto = config.dangerously_skip_permissions.unwrap_or(true);
+    let agent = default_agent()
+        .apply_config(config)
+        .dangerously_skip_permissions(auto);
+    if auto {
         agent.arg("--dangerously-bypass-approvals-and-sandbox")
     } else {
         agent.args(["--sandbox", "workspace-write"])
@@ -43,8 +47,24 @@ mod tests {
     }
 
     #[test]
-    fn enables_workspace_write_sandbox_by_default() {
+    fn bypasses_the_sandbox_by_default() {
         let agent = build(&AgentConfig::default());
+        assert!(
+            agent
+                .arguments()
+                .iter()
+                .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")
+        );
+        assert!(!agent.arguments().iter().any(|a| a == "--sandbox"));
+    }
+
+    #[test]
+    fn opt_out_restores_the_workspace_write_sandbox() {
+        let config = AgentConfig {
+            dangerously_skip_permissions: Some(false),
+            ..Default::default()
+        };
+        let agent = build(&config);
         assert!(agent.arguments().iter().any(|a| a == "--sandbox"));
         assert!(agent.arguments().iter().any(|a| a == "workspace-write"));
         assert!(
@@ -56,29 +76,18 @@ mod tests {
     }
 
     #[test]
-    fn bypass_replaces_the_sandbox_when_requested() {
-        let config = AgentConfig {
-            dangerously_skip_permissions: Some(true),
-            ..Default::default()
-        };
-        let agent = build(&config);
-        assert!(
-            agent
-                .arguments()
-                .iter()
-                .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")
-        );
-        assert!(!agent.arguments().iter().any(|a| a == "--sandbox"));
-    }
-
-    #[test]
-    fn user_args_override_defaults_but_still_get_a_sandbox() {
+    fn user_args_override_defaults_but_still_get_the_bypass() {
         let config = AgentConfig {
             args: Some(vec!["exec".into(), "-".into()]),
             ..Default::default()
         };
         let agent = build(&config);
         assert_eq!(&agent.arguments()[..2], ["exec", "-"]);
-        assert!(agent.arguments().iter().any(|a| a == "workspace-write"));
+        assert!(
+            agent
+                .arguments()
+                .iter()
+                .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")
+        );
     }
 }

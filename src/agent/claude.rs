@@ -1,6 +1,8 @@
 //! Claude Code adapter.
 //!
-//! `claude --print <prompt>` runs non-interactively.
+//! `claude --print <prompt>` runs non-interactively. It bypasses permission
+//! checks by default (issue #33); `dangerously_skip_permissions = false` opts
+//! out.
 
 use crate::agent::command::CommandAgent;
 use crate::config::{AgentConfig, PromptDelivery};
@@ -14,8 +16,11 @@ pub fn default_agent() -> CommandAgent {
 
 /// Build a Claude Code adapter, applying user overrides.
 pub fn build(config: &AgentConfig) -> CommandAgent {
-    let agent = default_agent().apply_config(config);
-    if agent.dangerously_skip_permissions_enabled() {
+    let auto = config.dangerously_skip_permissions.unwrap_or(true);
+    let agent = default_agent()
+        .apply_config(config)
+        .dangerously_skip_permissions(auto);
+    if auto {
         agent.arg("--dangerously-skip-permissions")
     } else {
         agent
