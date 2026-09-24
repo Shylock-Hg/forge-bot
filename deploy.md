@@ -74,23 +74,25 @@ Validate:
 ./target/release/forge-bot --config forge-bot.toml check
 ```
 
-## 3. Register the webhook (owner/admin only)
+## 3. Register the webhook
+
+The helper defaults to a **user-level** hook — every repository owned by the
+token's user:
 
 ```bash
 export FORGEJO_URL=http://127.0.0.1:3000
-export FORGEJO_TOKEN=...              # owner/admin token
+export FORGEJO_TOKEN=...              # token with write:user
 export FORGEJO_WEBHOOK_SECRET=...
 ./contrib/register-webhook.sh
 ```
 
-`REPO` defaults to the repository of the current git remote; set
-`REPO=owner/repo` to target a different one. For organization, user (all of a
-user's repositories) and system (whole instance) hooks, see
-[`doc/forgejo-webhook.md`](doc/forgejo-webhook.md). Then set
-`[poller] enabled = false`. If Forgejo refuses to deliver to loopback, add
-`127.0.0.1` to `[webhook] ALLOWED_HOST_LIST` in `app.ini`, or keep the poller
-enabled instead. A collaborator token cannot create hooks — use the poller in
-that case.
+Use `SCOPE=repo` (with `REPO`, defaulting to the current git remote) for a
+single repository, `SCOPE=org ORG=...` for an organization, or `SCOPE=system`
+for the whole instance. See [`doc/forgejo-webhook.md`](doc/forgejo-webhook.md).
+Then set `[poller] enabled = false`. If Forgejo refuses to deliver to loopback,
+add `127.0.0.1` to `[webhook] ALLOWED_HOST_LIST` in `app.ini`, or keep the
+poller enabled instead. A collaborator token cannot create hooks — use the
+poller in that case.
 
 ## 4. Start
 

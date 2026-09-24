@@ -4,16 +4,18 @@
 #
 # Usage:
 #   FORGEJO_TOKEN=... FORGEJO_WEBHOOK_SECRET=... ./contrib/register-webhook.sh
-#   SCOPE=user   FORGEJO_TOKEN=... FORGEJO_WEBHOOK_SECRET=... ./contrib/register-webhook.sh
-#   SCOPE=org    ORG=my-org          ... ./contrib/register-webhook.sh
-#   SCOPE=system ...                 ./contrib/register-webhook.sh
+#       # default: a user-level hook covering every repository owned by the
+#       # token's user (needs write:user)
+#   SCOPE=repo REPO=owner/repo ... ./contrib/register-webhook.sh
+#   SCOPE=org  ORG=my-org      ... ./contrib/register-webhook.sh
+#   SCOPE=system               ... ./contrib/register-webhook.sh
 #
 # Environment:
 #   FORGEJO_URL             Base URL of the Forgejo instance (default
 #                           http://127.0.0.1:3000)
 #   FORGEJO_TOKEN           Access token with the scope/role for SCOPE (required)
 #   FORGEJO_WEBHOOK_SECRET  Shared secret, must match the bot config (required)
-#   SCOPE                   repo (default), org, user or system
+#   SCOPE                   user (default), repo, org or system
 #   REPO                    owner/repo, when SCOPE=repo
 #                           (default: the current git remote's repository)
 #   ORG                     organization name, when SCOPE=org
@@ -22,9 +24,9 @@
 #   EVENTS                  JSON event list (default ["issue_comment"])
 #
 # Scope requirements (scope + role):
+#   user    write:user (covers every repository owned by the token's user)
 #   repo    write:repository + repository owner/admin
 #   org     write:organization + organization owner
-#   user    write:user (covers every repository owned by the token's user)
 #   system  write:admin + instance administrator (covers the whole instance)
 
 set -euo pipefail
@@ -34,7 +36,7 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${FORGEJO_TOKEN:?set FORGEJO_TOKEN to a token with the required scope}"
 : "${FORGEJO_WEBHOOK_SECRET:?set FORGEJO_WEBHOOK_SECRET to a shared secret}"
 
-SCOPE="${SCOPE:-repo}"
+SCOPE="${SCOPE:-user}"
 FORGEJO_URL="${FORGEJO_URL:-http://127.0.0.1:3000}"
 BOT_URL="${BOT_URL:-http://127.0.0.1:8080/webhooks/forgejo}"
 EVENTS="${EVENTS:-[\"issue_comment\"]}"
@@ -63,7 +65,7 @@ case "$SCOPE" in
         requirements="write:admin and an instance administrator"
         ;;
     *)
-        echo "unknown SCOPE '$SCOPE' (expected repo, org, user or system)" >&2
+        echo "unknown SCOPE '$SCOPE' (expected user, repo, org or system)" >&2
         exit 2
         ;;
 esac

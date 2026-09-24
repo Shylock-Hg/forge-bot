@@ -71,6 +71,30 @@ Copy `FORGEJO_WEBHOOK_SECRET` into the bot config/EnvironmentFile as well.
 
 ---
 
+## Helper script
+
+[`contrib/register-webhook.sh`](../contrib/register-webhook.sh) creates hooks
+for any scope. It defaults to a **user-level** hook:
+
+```bash
+# user-level: every repository owned by the token's user (default)
+./contrib/register-webhook.sh
+
+# a single repository (REPO defaults to the current git remote)
+SCOPE=repo ./contrib/register-webhook.sh
+
+# an organization
+SCOPE=org ORG=my-org ./contrib/register-webhook.sh
+
+# whole instance (instance-admin token)
+SCOPE=system ./contrib/register-webhook.sh
+```
+
+It validates its inputs and prints the required scope/role when Forgejo
+rejects the request.
+
+---
+
 ## 1. Repository webhook
 
 **UI:** Repository → **Settings → Webhooks → Add Webhook → Forgejo**.
@@ -87,25 +111,6 @@ curl -X POST \
   "$FORGEJO_URL/api/v1/repos/$REPO/hooks" \
   -d "$HOOK_BODY"
 ```
-
-The helper [`contrib/register-webhook.sh`](../contrib/register-webhook.sh)
-does this for any scope, defaulting `REPO` to the current git remote:
-
-```bash
-# repository (default)
-./contrib/register-webhook.sh
-
-# every repository owned by the token's user
-SCOPE=user ./contrib/register-webhook.sh
-
-# every repository in an organization
-SCOPE=org ORG=my-org ./contrib/register-webhook.sh
-
-# whole instance (instance-admin token)
-SCOPE=system ./contrib/register-webhook.sh
-```
-
-It prints the required scope/role when the request is rejected.
 
 ## 2. Organization webhook
 
