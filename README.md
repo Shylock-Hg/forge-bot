@@ -92,8 +92,13 @@ Implemented:
 - [x] Location URL + message extraction
 - [x] Codex adapter
 - [x] Pi / Kimi / Claude Code adapters
+- [x] Auto-approve: codex always bypasses its sandbox; claude skips permission
+  checks and pi trusts project files by default (`dangerously_skip_permissions = false`
+  opts those two out)
 - [x] Long-lived Pi RPC agent pool (`pi-rpc`): reuses an idle agent, spawns one when all are busy
-- [x] Per-thread agent sessions: one conversation per `owner/repo` issue or PR, resumed by `pi-rpc` and by the one-shot `codex`/`pi`/`claude` adapters, so the model context (and its prompt cache) is reused across comments
+- [x] Per-thread agent sessions: one conversation per `owner/repo` issue or PR,
+  resumed by `pi-rpc` and the one-shot `codex`/`pi`/`claude` adapters, so the
+  model context (and its prompt cache) is reused across comments
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Bounded job queue + on-disk session/job persistence
 - [x] GitHub and GitLab adapters
