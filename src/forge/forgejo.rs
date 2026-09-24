@@ -7,8 +7,8 @@ use url::Url;
 use crate::config::ForgejoConfig;
 use crate::error::{BotError, Result};
 use crate::forge::{
-    ForgeAdapter, ForgeMessage, linked_issue_ref, parse_comment_payload, parse_description_payload,
-    verify_hmac_sha256,
+    ForgeAdapter, ForgeMessage, ReplyTarget, ReviewCommentTarget, linked_issue_ref,
+    parse_comment_payload, parse_description_payload, verify_hmac_sha256,
 };
 use crate::location::ForgeKind;
 
@@ -92,10 +92,16 @@ impl ForgeAdapter for ForgejoAdapter {
 
         match event.as_str() {
             // Gitea/Forgejo signal conversation comments with `issue_comment`
-            // plus a `pull_request` object; older versions send
-            // `pull_request_review_comment` for inline review comments.
+            // plus a `pull_request` object; older versions inline inline review
+            // comments in `pull_request_review_comment` events.
             "issue_comment" | "pull_request_review_comment" | "" => {
-                parse_comment_payload(ForgeKind::Forgejo, &self.base_url, body, &event)
+                let mut messages =
+                    parse_comment_payload(ForgeKind::Forgejo, &self.base_url, body, &event)?;
+                // The shared parser cannot tell a review-comment reply from a
+                // conversation comment, so recover the thread coordinates when
+                // the payload happens to carry them.
+                apply_review_reply_target(&mut messages, body);
+                Ok(messages)
             }
             // Forgejo signals reviews with `pull_request_comment` but does not
             // inline the comments; `enrich` fetches them from the API.
@@ -263,6 +269,10 @@ fn review_message(payload: &Value, comment: Option<&Value>, body: &str) -> Optio
         .and_then(Value::as_str)
         .and_then(linked_issue_ref);
 
+    // A review body has no code line to anchor to, so only inline comments get
+    // a review-thread reply target.
+    let reply_target = comment.and_then(review_reply_target).unwrap_or_default();
+
     Some(ForgeMessage {
         forge: ForgeKind::Forgejo,
         location,
@@ -275,7 +285,81 @@ fn review_message(payload: &Value, comment: Option<&Value>, body: &str) -> Optio
         linked_issue,
         event: "pull_request_comment".into(),
         title,
+        reply_target,
     })
+}
+
+/// Build the reply target for an inline review comment.
+///
+/// Forgejo exposes the new-side line as `position` and the old-side line as
+/// `original_position`; exactly one of them is non-zero. It maps them onto a
+/// signed line where the new side is positive and the old side is negative.
+fn review_reply_target(comment: &Value) -> Option<ReplyTarget> {
+    let review_id = comment
+        .get("pull_request_review_id")
+        .and_then(Value::as_i64);
+    review_reply_target_with_id(comment, review_id)
+}
+
+/// Like [`review_reply_target`], but with an explicit review id so a caller can
+/// fall back to the enclosing review when the comment omits it.
+fn review_reply_target_with_id(comment: &Value, review_id: Option<i64>) -> Option<ReplyTarget> {
+    let review_id = review_id?;
+    let path = comment.get("path")?.as_str()?.to_owned();
+    let new_position = comment.get("position").and_then(Value::as_i64).unwrap_or(0);
+    let old_position = comment
+        .get("original_position")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let line = if new_position > 0 {
+        new_position
+    } else if old_position > 0 {
+        -old_position
+    } else {
+        0
+    };
+    let extra_lines_count = comment
+        .get("extra_lines_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+
+    Some(ReplyTarget::ReviewComment(ReviewCommentTarget {
+        review_id,
+        path,
+        line,
+        extra_lines_count,
+    }))
+}
+
+/// Patch parsed messages with the review thread they belong to.
+///
+/// Forgejo can inline an inline-review comment in the webhook payload (the
+/// `pull_request_review_comment` event, or a reply delivered as an
+/// `issue_comment`). The generic parser defaults those to the conversation,
+/// which detaches the answer from the line under discussion; when the comment
+/// carries review coordinates, re-target the message at that thread.
+fn apply_review_reply_target(messages: &mut [ForgeMessage], body: &[u8]) {
+    let Ok(payload) = serde_json::from_slice::<Value>(body) else {
+        return;
+    };
+    let Some(comment) = payload.get("comment") else {
+        return;
+    };
+    // Older payloads omit the review id on the comment but still carry the
+    // review object; fall back to it rather than dropping the thread.
+    let review_id = comment
+        .get("pull_request_review_id")
+        .and_then(Value::as_i64)
+        .or_else(|| payload.pointer("/review/id").and_then(Value::as_i64));
+    let Some(target) = review_reply_target_with_id(comment, review_id) else {
+        return;
+    };
+    let comment_id = comment.get("id").and_then(Value::as_i64);
+    for message in messages.iter_mut() {
+        if message.comment_id == comment_id {
+            message.reply_target = target.clone();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -557,6 +641,8 @@ mod tests {
         );
         assert!(message.is_pull_request);
         assert_eq!(message.comment_id, None);
+        // A review body is not anchored to a code line.
+        assert_eq!(message.reply_target, ReplyTarget::Conversation);
     }
 
     #[test]
@@ -566,7 +652,12 @@ mod tests {
             "id": 8991,
             "body": "@agent inline",
             "html_url": "http://forge.local:3000/a/b/pulls/16#issuecomment-8991",
-            "user": {"login": "shylock"}
+            "user": {"login": "shylock"},
+            "pull_request_review_id": 103,
+            "path": "src/main.rs",
+            "position": 30,
+            "original_position": 0,
+            "extra_lines_count": 2
         });
         let message = review_message(&payload, Some(&comment), "@agent inline").unwrap();
         assert_eq!(message.comment_id, Some(8991));
@@ -578,6 +669,125 @@ mod tests {
             "http://forge.local:3000/a/b/pulls/16#issuecomment-8991"
         );
         assert!(message.is_pull_request);
+        // Inline comments carry the coordinates needed to answer in-thread.
+        assert_eq!(
+            message.reply_target,
+            ReplyTarget::ReviewComment(ReviewCommentTarget {
+                review_id: 103,
+                path: "src/main.rs".into(),
+                line: 30,
+                extra_lines_count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn inline_comment_on_the_old_side_uses_a_negative_line() {
+        let payload = serde_json::from_slice::<Value>(&review_payload("")).unwrap();
+        let comment = serde_json::json!({
+            "id": 8992,
+            "body": "@agent old",
+            "html_url": "http://forge.local:3000/a/b/pulls/16#issuecomment-8992",
+            "user": {"login": "shylock"},
+            "pull_request_review_id": 103,
+            "path": "src/main.rs",
+            "position": 0,
+            "original_position": 12
+        });
+        let message = review_message(&payload, Some(&comment), "@agent old").unwrap();
+        assert_eq!(
+            message.reply_target,
+            ReplyTarget::ReviewComment(ReviewCommentTarget {
+                review_id: 103,
+                path: "src/main.rs".into(),
+                line: -12,
+                extra_lines_count: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn inlined_review_comment_reply_keeps_its_thread() {
+        let a = adapter();
+        let payload = serde_json::json!({
+            "action": "created",
+            "number": 16,
+            "pull_request": {
+                "number": 16,
+                "title": "feat: something",
+                "body": "This fixes #5.",
+                "html_url": "http://forge.local:3000/a/b/pulls/16"
+            },
+            "comment": {
+                "id": 9093,
+                "body": "@agent why?",
+                "html_url": "http://forge.local:3000/a/b/pulls/16#issuecomment-9093",
+                "user": {"login": "shylock"},
+                "pull_request_review_id": 111,
+                "path": "src/agent/command.rs",
+                "position": 161,
+                "original_position": 0,
+                "extra_lines_count": 1
+            },
+            "repository": {"full_name": "a/b"},
+            "sender": {"login": "shylock"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let messages = a
+            .parse(&headers("pull_request_review_comment", None), &body)
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.comment_id, Some(9093));
+        assert!(message.is_pull_request);
+        assert_eq!(
+            message.reply_target,
+            ReplyTarget::ReviewComment(ReviewCommentTarget {
+                review_id: 111,
+                path: "src/agent/command.rs".into(),
+                line: 161,
+                extra_lines_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn inlined_review_comment_falls_back_to_the_review_id() {
+        let a = adapter();
+        let payload = serde_json::json!({
+            "action": "created",
+            "number": 16,
+            "pull_request": {
+                "number": 16,
+                "html_url": "http://forge.local:3000/a/b/pulls/16"
+            },
+            "review": {"id": 111},
+            "comment": {
+                "id": 9094,
+                "body": "@agent reply",
+                "html_url": "http://forge.local:3000/a/b/pulls/16#issuecomment-9094",
+                "user": {"login": "shylock"},
+                "path": "src/agent/command.rs",
+                "position": 0,
+                "original_position": 7
+            },
+            "repository": {"full_name": "a/b"},
+            "sender": {"login": "shylock"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let messages = a.parse(&headers("issue_comment", None), &body).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].reply_target,
+            ReplyTarget::ReviewComment(ReviewCommentTarget {
+                review_id: 111,
+                path: "src/agent/command.rs".into(),
+                line: -7,
+                extra_lines_count: 0,
+            })
+        );
     }
 
     #[tokio::test]
@@ -595,7 +805,7 @@ mod tests {
                 let read = socket.read(&mut buffer).await.unwrap();
                 let request = String::from_utf8_lossy(&buffer[..read]);
                 let body = if request.contains("/comments") {
-                    r#"[{"id":8991,"body":"@agent inline","html_url":"http://forge.local/a/b/pulls/16#issuecomment-8991","user":{"login":"shylock"}}]"#
+                    r#"[{"id":8991,"body":"@agent inline","html_url":"http://forge.local/a/b/pulls/16#issuecomment-8991","user":{"login":"shylock"},"pull_request_review_id":103,"path":"src/main.rs","position":30,"original_position":0}]"#
                 } else if request.contains("/pulls/16/reviews") {
                     r#"[{"id":100,"comments_count":1},{"id":102,"comments_count":1}]"#
                 } else {
@@ -630,5 +840,14 @@ mod tests {
         assert_eq!(message.author, "shylock");
         assert_eq!(message.number, Some(16));
         assert!(message.is_pull_request);
+        assert_eq!(
+            message.reply_target,
+            ReplyTarget::ReviewComment(ReviewCommentTarget {
+                review_id: 103,
+                path: "src/main.rs".into(),
+                line: 30,
+                extra_lines_count: 0,
+            })
+        );
     }
 }

@@ -253,6 +253,7 @@ mod tests {
             linked_issue: None,
             event: "issues".into(),
             title: None,
+            reply_target: Default::default(),
         };
 
         // Comments key on their id.

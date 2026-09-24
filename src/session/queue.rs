@@ -110,12 +110,7 @@ impl Dispatcher {
                 "🤖 On it — running agent **{}**. I'll report back here when it finishes.",
                 job.agent
             );
-            if let Err(error) = self
-                .inner
-                .api
-                .post_comment(&job.message.location, &ack)
-                .await
-            {
+            if let Err(error) = self.inner.api.reply(&job.message, &ack).await {
                 tracing::warn!(%error, "failed to post acknowledgement");
             }
         }
@@ -196,6 +191,7 @@ impl Inner {
             is_pull_request: job.message.is_pull_request,
             linked_issue: job.message.linked_issue.clone(),
             title: job.message.title.clone(),
+            reply_target: job.message.reply_target.clone(),
             credentials,
         };
 
@@ -223,14 +219,14 @@ impl Inner {
                         "⚠️ Agent **{}** is at capacity; running agent **{name}** instead.",
                         job.agent
                     );
-                    self.reply(&job.message.location, &notice).await;
+                    self.reply(&job.message, &notice).await;
                 }
             } else if self.config.reply.ack {
                 let previous = &candidates[index - 1];
                 let notice = format!(
                     "⚠️ Agent **{previous}** hit a capacity limit; switching to **{name}**."
                 );
-                self.reply(&job.message.location, &notice).await;
+                self.reply(&job.message, &notice).await;
             }
 
             let agent = match self.agents.get(name) {
@@ -326,7 +322,7 @@ impl Inner {
                     outcome.duration, summary
                 )
             };
-            self.reply(&job.message.location, &body).await;
+            self.reply(&job.message, &body).await;
         }
     }
 
@@ -335,7 +331,7 @@ impl Inner {
     async fn finish_no_agent(&self, key: &str, job: &Job) {
         let outcome = AgentOutcome::failure(NO_AVAILABLE_AGENT, Default::default());
         self.persist_outcome(key, job, &job.agent, &outcome);
-        self.reply(&job.message.location, NO_AVAILABLE_AGENT).await;
+        self.reply(&job.message, NO_AVAILABLE_AGENT).await;
     }
 
     fn persist_outcome(&self, key: &str, job: &Job, agent: &str, outcome: &AgentOutcome) {
@@ -347,17 +343,19 @@ impl Inner {
         }
     }
 
-    async fn reply(&self, location: &url::Url, body: &str) {
-        match self.api.post_comment(location, body).await {
+    async fn reply(&self, message: &ForgeMessage, body: &str) {
+        match self.api.reply(message, body).await {
             Ok(()) => {}
             Err(error) if error.is_permission_denied() => {
                 tracing::warn!(
-                    %location,
+                    location = %message.location,
                     %error,
                     "cannot reply: the forge denied comment permission"
                 );
             }
-            Err(error) => tracing::warn!(%error, %location, "failed to post comment"),
+            Err(error) => {
+                tracing::warn!(%error, location = %message.location, "failed to post comment")
+            }
         }
     }
 }
@@ -428,6 +426,7 @@ mod tests {
             linked_issue: None,
             event: "issue_comment".into(),
             title: None,
+            reply_target: Default::default(),
         }
     }
 
@@ -473,6 +472,93 @@ mod tests {
         assert_eq!(comments.len(), 1, "exactly one acknowledgement");
         assert!(comments[0].1.contains("On it"));
         assert!(comments[0].1.contains("custom"));
+    }
+
+    /// Forge API that records the reply target of every reply, so tests can
+    /// assert that a mention is answered in its own thread.
+    #[derive(Default)]
+    struct ThreadAwareApi {
+        replies: std::sync::Mutex<Vec<crate::forge::ReplyTarget>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeApi for ThreadAwareApi {
+        async fn post_comment(
+            &self,
+            _location: &url::Url,
+            _body: &str,
+        ) -> crate::error::Result<()> {
+            unreachable!("thread-aware API must reply through `reply`")
+        }
+
+        async fn reply(&self, message: &ForgeMessage, _body: &str) -> crate::error::Result<()> {
+            self.replies
+                .lock()
+                .unwrap()
+                .push(message.reply_target.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn review_mention_acknowledgement_stays_in_thread() {
+        use crate::forge::{ReplyTarget, ReviewCommentTarget};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.reply.ack = true;
+        config.policy.allow_all = true;
+        config.agents.overrides.insert(
+            "custom".into(),
+            crate::config::AgentConfig {
+                command: Some("cat".into()),
+                ..Default::default()
+            },
+        );
+        let config = Arc::new(config);
+
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(ThreadAwareApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            Arc::new(AgentRegistry::from_config(&config)),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        let mut message = message("o/r");
+        message.is_pull_request = true;
+        message.number = Some(22);
+        message.location = Url::parse("http://forge.local/o/r/pulls/22#issuecomment-1").unwrap();
+        message.reply_target = ReplyTarget::ReviewComment(ReviewCommentTarget {
+            review_id: 9,
+            path: "src/lib.rs".into(),
+            line: 4,
+            extra_lines_count: 0,
+        });
+
+        dispatcher
+            .submit(
+                message,
+                Mention {
+                    agent: Some("custom".into()),
+                    message: "go".into(),
+                },
+                "custom",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let replies = api.replies.lock().unwrap().clone();
+        assert_eq!(replies.len(), 1, "exactly one acknowledgement");
+        assert!(matches!(
+            replies[0],
+            ReplyTarget::ReviewComment(ReviewCommentTarget { review_id: 9, .. })
+        ));
     }
 
     #[tokio::test]

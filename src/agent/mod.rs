@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::Result;
-use crate::forge::IssueRef;
+use crate::forge::{IssueRef, ReplyTarget};
 use crate::location::ForgeKind;
 
 pub use registry::AgentRegistry;
@@ -47,6 +47,12 @@ pub struct AgentContext {
     /// request to a stable agent instance; it is never exposed to the agent.
     pub linked_issue: Option<IssueRef>,
     pub title: Option<String>,
+    /// Thread the agent should answer in when it posts its own reply.
+    ///
+    /// The gateway uses the same target to relay a gateway-posted summary, but
+    /// a self-replying adapter (the `command` family, with `[reply] result =
+    /// false`) needs the coordinates itself to stay in an inline review thread.
+    pub reply_target: ReplyTarget,
     /// Environment variables carrying forge credentials.
     pub credentials: Vec<(String, String)>,
 }
@@ -138,6 +144,7 @@ mod tests {
             is_pull_request: false,
             linked_issue: None,
             title: None,
+            reply_target: ReplyTarget::Conversation,
             credentials: vec![("FORGEJO_TOKEN".into(), "secret".into())],
         };
         let env = ctx.environment(&request);

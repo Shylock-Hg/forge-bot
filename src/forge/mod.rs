@@ -30,6 +30,44 @@ pub struct IssueRef {
     pub number: u64,
 }
 
+/// Where a reply to an incoming comment should be posted.
+///
+/// Most mentions are answered in the issue / pull-request conversation. An
+/// inline code-review comment, however, forms its own thread, and answering it
+/// with a top-level conversation comment detaches the answer from the line it
+/// discusses. The reply target records enough forge-agnostic detail to post the
+/// answer back into the same thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplyTarget {
+    /// A normal conversation comment on the issue or pull request.
+    #[default]
+    Conversation,
+    /// A thread of inline comments attached to a code line of a review.
+    ReviewComment(ReviewCommentTarget),
+}
+
+/// Identity of an inline review thread.
+///
+/// Forgejo / Gitea group inline comments by the review they belong to plus the
+/// file path and line position, so replying means creating a comment with the
+/// same coordinates. `line` follows Forgejo's convention: a positive value
+/// anchors the comment on the new side of the diff, a negative value on the old
+/// side, and zero is unset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCommentTarget {
+    /// Id of the review the comment belongs to.
+    pub review_id: i64,
+    /// Path of the commented file, relative to the repository root.
+    pub path: String,
+    /// Line of the diff the comment is anchored to.
+    #[serde(default)]
+    pub line: i64,
+    /// Number of additional lines the comment spans.
+    #[serde(default)]
+    pub extra_lines_count: i64,
+}
+
 /// A normalized comment / issue event received from a forge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeMessage {
@@ -58,6 +96,10 @@ pub struct ForgeMessage {
     pub event: String,
     /// Title of the issue / pull request, used to enrich the agent prompt.
     pub title: Option<String>,
+    /// Where the reply to this message should be posted. Defaults to the
+    /// issue / pull-request conversation.
+    #[serde(default)]
+    pub reply_target: ReplyTarget,
 }
 
 impl ForgeMessage {
@@ -273,6 +315,7 @@ pub(crate) fn parse_comment_payload(
         linked_issue,
         event: event.to_owned(),
         title,
+        reply_target: ReplyTarget::Conversation,
     }])
 }
 
@@ -358,6 +401,7 @@ pub(crate) fn parse_description_payload(
         linked_issue,
         event: event.to_owned(),
         title,
+        reply_target: ReplyTarget::Conversation,
     }])
 }
 
@@ -593,6 +637,7 @@ mod tests {
             }),
             event: "issue_comment".into(),
             title: None,
+            reply_target: ReplyTarget::Conversation,
         };
         assert_eq!(message.conversation_key(), "forgejo:other/repo:5");
 
@@ -601,6 +646,28 @@ mod tests {
             number: 5,
         });
         assert_eq!(message.conversation_key(), "forgejo:a/b:5");
+    }
+
+    #[test]
+    fn reply_target_round_trips_and_defaults_to_conversation() {
+        let target = ReplyTarget::ReviewComment(ReviewCommentTarget {
+            review_id: 7,
+            path: "src/lib.rs".into(),
+            line: -3,
+            extra_lines_count: 1,
+        });
+        let json = serde_json::to_string(&target).unwrap();
+        assert!(json.contains("\"kind\":\"review_comment\""));
+        assert_eq!(serde_json::from_str::<ReplyTarget>(&json).unwrap(), target);
+
+        // A job persisted before the field existed must still load.
+        let message: ForgeMessage = serde_json::from_str(
+            r#"{"forge":"forgejo","location":"http://forge.local/a/b/issues/1",
+                "body":"x","author":"u","repository":"a/b","comment_id":null,
+                "number":1,"is_pull_request":false,"event":"issues","title":null}"#,
+        )
+        .unwrap();
+        assert_eq!(message.reply_target, ReplyTarget::Conversation);
     }
 
     #[test]

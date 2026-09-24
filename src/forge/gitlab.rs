@@ -200,6 +200,7 @@ impl ForgeAdapter for GitlabAdapter {
             linked_issue,
             event,
             title,
+            reply_target: Default::default(),
         }])
     }
 }

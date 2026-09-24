@@ -209,6 +209,7 @@ mod tests {
             linked_issue: None,
             event: "issue_comment".into(),
             title: None,
+            reply_target: Default::default(),
         }
     }
 

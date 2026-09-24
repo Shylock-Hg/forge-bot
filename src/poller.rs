@@ -380,6 +380,7 @@ fn message_from_comment(repo: &str, comment: &Value) -> Option<ForgeMessage> {
         linked_issue: None,
         event: "issue_comment".into(),
         title: None,
+        reply_target: Default::default(),
     })
 }
 
