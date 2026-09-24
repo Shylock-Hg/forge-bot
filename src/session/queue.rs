@@ -100,6 +100,24 @@ impl Dispatcher {
             .await
             .map_err(|_| BotError::Other(anyhow::anyhow!("job queue is closed")))?;
 
+        // Acknowledge as soon as the job is accepted, before any worker or
+        // agent capacity comes into play. Without this a mention in a busy
+        // thread can go unanswered until the running agent settles.
+        if self.inner.config.reply.ack {
+            let ack = format!(
+                "🤖 On it — running agent **{}**. I'll report back here when it finishes.",
+                job.agent
+            );
+            if let Err(error) = self
+                .inner
+                .api
+                .post_comment(&job.message.location, &ack)
+                .await
+            {
+                tracing::warn!(%error, "failed to post acknowledgement");
+            }
+        }
+
         tracing::info!(job = %job.id, agent = %job.agent, repo = %job.message.repository, "job queued");
         Ok(job.id)
     }
@@ -174,14 +192,6 @@ impl Inner {
             title: job.message.title.clone(),
             credentials,
         };
-
-        if self.config.reply.ack {
-            let ack = format!(
-                "🤖 On it — running agent **{}**. I'll report back here when it finishes.",
-                job.agent
-            );
-            self.reply(&job.message.location, &ack).await;
-        }
 
         let outcome = agent.run(&request, &context).await;
         let outcome = match outcome {
@@ -272,7 +282,7 @@ fn truncate(input: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::agent::AgentRegistry;
-    use crate::forge_api::NoopForgeApi;
+    use crate::forge_api::{NoopForgeApi, RecordingForgeApi};
     use crate::location::ForgeKind;
     use url::Url;
 
@@ -300,6 +310,50 @@ mod tests {
             event: "issue_comment".into(),
             title: None,
         }
+    }
+
+    #[tokio::test]
+    async fn acknowledges_when_the_job_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.reply.ack = true;
+        config.policy.allow_all = true;
+        config.agents.overrides.insert(
+            "custom".into(),
+            crate::config::AgentConfig {
+                command: Some("cat".into()),
+                ..Default::default()
+            },
+        );
+        let config = Arc::new(config);
+
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingForgeApi::new());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            AgentRegistry::from_config(&config),
+            sessions,
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("custom".into()),
+                    message: "go".into(),
+                },
+                "custom",
+            )
+            .await
+            .unwrap();
+
+        let comments = api.comments();
+        assert_eq!(comments.len(), 1, "exactly one acknowledgement");
+        assert!(comments[0].1.contains("On it"));
+        assert!(comments[0].1.contains("custom"));
     }
 
     #[tokio::test]

@@ -25,7 +25,9 @@ git_author_name = "forge-bot"
 git_author_email = "forge-bot@localhost"
 
 [reply]
-ack = false
+# Post "on it" as soon as the mention is accepted, so a busy or slow agent
+# does not leave the thread unanswered.
+ack = true
 result = true
 
 [session]

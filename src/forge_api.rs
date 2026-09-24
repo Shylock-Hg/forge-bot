@@ -161,6 +161,37 @@ impl ForgeApi for NoopForgeApi {
     }
 }
 
+/// A [`ForgeApi`] that records every posted comment, for tests.
+#[derive(Debug, Default)]
+pub struct RecordingForgeApi {
+    comments: std::sync::Mutex<Vec<(Url, String)>>,
+}
+
+impl RecordingForgeApi {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Snapshot of the comments posted so far, oldest first.
+    pub fn comments(&self) -> Vec<(Url, String)> {
+        self.comments
+            .lock()
+            .expect("recording forge api mutex poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ForgeApi for RecordingForgeApi {
+    async fn post_comment(&self, location: &Url, body: &str) -> Result<()> {
+        self.comments
+            .lock()
+            .expect("recording forge api mutex poisoned")
+            .push((location.clone(), body.to_owned()));
+        Ok(())
+    }
+}
+
 /// Percent-encode a string for use inside a URL path segment.
 fn urlencoding(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
