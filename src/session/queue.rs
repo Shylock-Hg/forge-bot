@@ -170,7 +170,7 @@ impl Inner {
             repository: job.message.repository.clone(),
             issue_number: job.message.number,
             is_pull_request: job.message.is_pull_request,
-            linked_issue_number: job.message.linked_issue,
+            linked_issue: job.message.linked_issue.clone(),
             title: job.message.title.clone(),
             credentials,
         };

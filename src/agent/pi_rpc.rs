@@ -525,19 +525,27 @@ fn conversation_key(context: &AgentContext) -> String {
     if context.repository.is_empty() {
         return context.workspace.to_string_lossy().into_owned();
     }
-    let number = if context.is_pull_request {
-        context.linked_issue_number.or(context.issue_number)
+    // A pull request folds onto the issue it closes. When that issue is in
+    // another repository, use its owner/repo so the two threads share a key.
+    let (repository, number) = if context.is_pull_request {
+        match &context.linked_issue {
+            Some(linked) => (
+                linked.repository.as_deref().unwrap_or(&context.repository),
+                Some(linked.number),
+            ),
+            None => (context.repository.as_str(), context.issue_number),
+        }
     } else {
-        context.issue_number
+        (context.repository.as_str(), context.issue_number)
     };
     match context.forge {
         Some(forge) => format!(
             "{}:{}:{}",
             forge.as_str(),
-            context.repository,
+            repository,
             number.unwrap_or_default()
         ),
-        None => format!("{}:{}", context.repository, number.unwrap_or_default()),
+        None => format!("{repository}:{}", number.unwrap_or_default()),
     }
 }
 
@@ -571,6 +579,7 @@ fn build_prompt(request: &AgentRequest, context: &AgentContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::IssueRef;
     use crate::location::ForgeKind;
 
     fn cfg() -> PiRpcConfig {
@@ -748,7 +757,10 @@ for line in sys.stdin:
             repository: "o/r".into(),
             issue_number: Some(12),
             is_pull_request: true,
-            linked_issue_number: Some(5),
+            linked_issue: Some(IssueRef {
+                repository: None,
+                number: 5,
+            }),
             ..Default::default()
         };
         assert_eq!(conversation_key(&pr), "forgejo:o/r:5");
@@ -758,7 +770,7 @@ for line in sys.stdin:
             repository: "o/r".into(),
             issue_number: Some(12),
             is_pull_request: true,
-            linked_issue_number: None,
+            linked_issue: None,
             ..Default::default()
         };
         assert_eq!(conversation_key(&unlinked), "forgejo:o/r:12");
@@ -770,5 +782,20 @@ for line in sys.stdin:
             ..Default::default()
         };
         assert_eq!(conversation_key(&issue), "forgejo:o/r:5");
+
+        // A cross-repository link keeps the linked issue's owner/repo, so the
+        // PR and the issue it closes share one key.
+        let cross_repo = AgentContext {
+            forge: Some(ForgeKind::Forgejo),
+            repository: "o/r".into(),
+            issue_number: Some(12),
+            is_pull_request: true,
+            linked_issue: Some(IssueRef {
+                repository: Some("other/repo".into()),
+                number: 5,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(conversation_key(&cross_repo), "forgejo:other/repo:5");
     }
 }

@@ -107,7 +107,7 @@ impl ForgeAdapter for ForgejoAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::hmac_sha256_hex;
+    use crate::forge::{IssueRef, hmac_sha256_hex};
 
     fn adapter() -> ForgejoAdapter {
         ForgejoAdapter::new(&ForgejoConfig {
@@ -225,7 +225,40 @@ mod tests {
         let m = &a.handle(&h, body).unwrap()[0];
         assert!(m.is_pull_request);
         assert_eq!(m.number, Some(12));
-        assert_eq!(m.linked_issue, Some(5));
+        assert_eq!(
+            m.linked_issue,
+            Some(IssueRef {
+                repository: None,
+                number: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn links_pull_request_to_issue_in_another_repository() {
+        let a = adapter();
+        let raw = r#"{
+            "action": "created",
+            "issue": {
+                "number": 12,
+                "body": "This fixes other/repo#5 and adds tests.",
+                "pull_request": {"url": "x"},
+                "html_url": "http://forge.local:3000/a/b/pulls/12"
+            },
+            "comment": {"id": 3, "body": "@agent x", "user": {"login": "u"}},
+            "repository": {"full_name": "a/b"}
+        }"#;
+        let body = raw.as_bytes();
+        let sig = hmac_sha256_hex(b"hush", body);
+        let h = headers("issue_comment", Some(&sig));
+        let m = &a.handle(&h, body).unwrap()[0];
+        assert_eq!(
+            m.linked_issue,
+            Some(IssueRef {
+                repository: Some("other/repo".into()),
+                number: 5,
+            })
+        );
     }
 
     #[test]

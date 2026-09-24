@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::Result;
+use crate::forge::IssueRef;
 use crate::location::ForgeKind;
 
 pub use registry::AgentRegistry;
@@ -43,7 +44,7 @@ pub struct AgentContext {
     pub is_pull_request: bool,
     /// Issue a pull request closes, when known. Used only for routing the
     /// request to a stable agent instance; it is never exposed to the agent.
-    pub linked_issue_number: Option<u64>,
+    pub linked_issue: Option<IssueRef>,
     pub title: Option<String>,
     /// Environment variables carrying forge credentials.
     pub credentials: Vec<(String, String)>,
@@ -134,7 +135,7 @@ mod tests {
             repository: "o/r".into(),
             issue_number: Some(1),
             is_pull_request: false,
-            linked_issue_number: None,
+            linked_issue: None,
             title: None,
             credentials: vec![("FORGEJO_TOKEN".into(), "secret".into())],
         };

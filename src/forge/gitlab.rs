@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::config::GitlabConfig;
 use crate::error::{BotError, Result};
-use crate::forge::{ForgeAdapter, ForgeMessage, constant_time_eq, linked_issue_number};
+use crate::forge::{ForgeAdapter, ForgeMessage, constant_time_eq, linked_issue_ref};
 use crate::location::ForgeKind;
 
 /// GitLab webhook adapter.
@@ -168,7 +168,7 @@ impl ForgeAdapter for GitlabAdapter {
                 .get("merge_request")
                 .and_then(|m| m.get("description"))
                 .and_then(Value::as_str)
-                .and_then(linked_issue_number)
+                .and_then(linked_issue_ref)
         } else {
             None
         };
@@ -207,6 +207,7 @@ impl ForgeAdapter for GitlabAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::IssueRef;
 
     fn adapter() -> GitlabAdapter {
         GitlabAdapter::new(&GitlabConfig {
@@ -254,5 +255,38 @@ mod tests {
         assert_eq!(msgs[0].number, Some(9));
         assert_eq!(msgs[0].repository, "group/proj");
         assert_eq!(msgs[0].comment_id, Some(42));
+    }
+
+    #[test]
+    fn links_merge_request_to_issue_in_another_project() {
+        let a = adapter();
+        let raw = r#"{
+            "object_kind": "note",
+            "user": {"username": "dev"},
+            "project": {"path_with_namespace": "group/proj",
+                        "web_url": "https://gitlab.example.com/group/proj"},
+            "object_attributes": {
+                "note": "@agent review this",
+                "id": 42,
+                "system": false,
+                "noteable_type": "MergeRequest",
+                "url": "https://gitlab.example.com/group/proj/-/merge_requests/9#note_42"
+            },
+            "merge_request": {
+                "iid": 9,
+                "title": "Add feature",
+                "description": "This closes other/sub/proj#5."
+            }
+        }"#;
+        let mut h = HeaderMap::new();
+        h.insert("x-gitlab-event", "Note Hook".parse().unwrap());
+        let msgs = a.parse(&h, raw.as_bytes()).unwrap();
+        assert_eq!(
+            msgs[0].linked_issue,
+            Some(IssueRef {
+                repository: Some("other/sub/proj".into()),
+                number: 5,
+            })
+        );
     }
 }

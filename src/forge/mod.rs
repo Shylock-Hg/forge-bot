@@ -16,6 +16,20 @@ use url::Url;
 use crate::error::Result;
 use crate::location::ForgeKind;
 
+/// A reference to an issue or pull request.
+///
+/// The repository is optional: `None` means "the same repository as the
+/// message that carried the reference", while `Some("owner/repo")` is an
+/// explicit cross-repository reference (for example `Fixes other/repo#7`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueRef {
+    /// `owner/repo`, when the reference names one explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Issue or pull request number.
+    pub number: u64,
+}
+
 /// A normalized comment / issue event received from a forge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeMessage {
@@ -39,7 +53,7 @@ pub struct ForgeMessage {
     /// request and its issue on the same conversation, and is never sent to
     /// the agent.
     #[serde(default)]
-    pub linked_issue: Option<u64>,
+    pub linked_issue: Option<IssueRef>,
     /// The forge event name, e.g. `issue_comment`.
     pub event: String,
     /// Title of the issue / pull request, used to enrich the agent prompt.
@@ -52,15 +66,24 @@ impl ForgeMessage {
     /// so a pull request and the issue it closes share an agent/session. The
     /// key never leaves the gateway.
     pub fn conversation_key(&self) -> String {
-        let number = if self.is_pull_request {
-            self.linked_issue.or(self.number)
+        // A pull request folds onto the issue it closes; when that issue lives
+        // in another repository, use *its* owner/repo so both threads share a
+        // key instead of colliding with a same-numbered issue here.
+        let (repository, number) = if self.is_pull_request {
+            match &self.linked_issue {
+                Some(linked) => (
+                    linked.repository.as_deref().unwrap_or(&self.repository),
+                    Some(linked.number),
+                ),
+                None => (self.repository.as_str(), self.number),
+            }
         } else {
-            self.number
+            (self.repository.as_str(), self.number)
         };
         format!(
             "{}:{}:{}",
             self.forge,
-            self.repository,
+            repository,
             number.unwrap_or_default()
         )
     }
@@ -207,7 +230,7 @@ pub(crate) fn parse_comment_payload(
         issue
             .and_then(|i| i.get("body"))
             .and_then(Value::as_str)
-            .and_then(linked_issue_number)
+            .and_then(linked_issue_ref)
     } else {
         None
     };
@@ -293,7 +316,7 @@ pub(crate) fn parse_description_payload(
         .map(str::to_owned);
 
     let linked_issue = if is_pull_request {
-        linked_issue_number(body_text)
+        linked_issue_ref(body_text)
     } else {
         None
     };
@@ -326,9 +349,11 @@ pub(crate) fn parse_description_payload(
 /// (`close(s|d)`, `fix(es|ed)`, `resolve(s|d)`) in a description.
 ///
 /// Forgejo, GitHub and GitLab all recognize those keywords to link a pull
-/// request to the issue it addresses; the gateway only needs the number so it
-/// can keep both threads on one agent.
-pub(crate) fn linked_issue_number(body: &str) -> Option<u64> {
+/// request to the issue it addresses. The reference may be `#123` (same
+/// repository) or `owner/repo#123` (another repository); keeping the
+/// owner/repo lets a pull request and the issue it closes share one
+/// conversation even across repositories.
+pub(crate) fn linked_issue_ref(body: &str) -> Option<IssueRef> {
     // Longest forms first so `closes` is not shadowed by `close`.
     const KEYWORDS: [&str; 9] = [
         "closes", "closed", "close", "fixes", "fixed", "fix", "resolves", "resolved", "resolve",
@@ -337,7 +362,7 @@ pub(crate) fn linked_issue_number(body: &str) -> Option<u64> {
     let lower = body.to_ascii_lowercase();
     // Track the earliest reference in the text so `Fixes #3, closes #4`
     // resolves to 3 regardless of the order keywords are checked.
-    let mut best: Option<(usize, u64)> = None;
+    let mut best: Option<(usize, IssueRef)> = None;
     for keyword in KEYWORDS {
         let mut from = 0;
         while let Some(offset) = lower[from..].find(keyword) {
@@ -345,27 +370,68 @@ pub(crate) fn linked_issue_number(body: &str) -> Option<u64> {
             let end = start + keyword.len();
             from = end;
 
-            // Require a token boundary before the keyword.
-            if start > 0 && lower.as_bytes()[start - 1].is_ascii_alphanumeric() {
+            // Require a word boundary on both sides of the keyword so neither
+            // `closely` nor `fixedly` is mistaken for a closing keyword.
+            if start > 0 && is_word_byte(lower.as_bytes()[start - 1]) {
+                continue;
+            }
+            if lower
+                .as_bytes()
+                .get(end)
+                .is_some_and(|byte| is_word_byte(*byte))
+            {
                 continue;
             }
 
             let mut rest = lower[end..].trim_start();
             rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
-            let Some(rest) = rest.strip_prefix('#') else {
+
+            // The reference is the next whitespace-delimited token, shaped like
+            // `[owner/repo]#123`.
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            let Some((repo_part, num_part)) = token.split_once('#') else {
                 continue;
             };
-            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-            if let Ok(number) = digits.parse::<u64>() {
-                if best.is_none_or(|(seen, _)| start < seen) {
-                    best = Some((start, number));
-                }
-                // The first valid reference for this keyword wins.
-                break;
+            // Trim surrounding punctuation, then require a plausible
+            // `owner/repo` qualifier (reject URLs, bare words, ...).
+            let repo_part = repo_part.trim_matches(|c: char| !is_repo_char(c));
+            if !repo_part.is_empty()
+                && (!repo_part.contains('/') || !repo_part.chars().all(is_repo_char))
+            {
+                continue;
             }
+            let digits: String = num_part.chars().take_while(char::is_ascii_digit).collect();
+            let Ok(number) = digits.parse::<u64>() else {
+                continue;
+            };
+            if number == 0 {
+                continue;
+            }
+
+            let reference = IssueRef {
+                repository: if repo_part.is_empty() {
+                    None
+                } else {
+                    Some(repo_part.to_owned())
+                },
+                number,
+            };
+            if best.as_ref().is_none_or(|(seen, _)| start < *seen) {
+                best = Some((start, reference));
+            }
+            // The first valid reference for this keyword wins.
+            break;
         }
     }
-    best.map(|(_, number)| number)
+    best.map(|(_, reference)| reference)
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_repo_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')
 }
 
 fn description_location(
@@ -456,14 +522,69 @@ mod tests {
 
     #[test]
     fn extracts_linked_issue_from_closing_keywords() {
-        assert_eq!(linked_issue_number("Fixes #42"), Some(42));
-        assert_eq!(linked_issue_number("closes: #7"), Some(7));
-        assert_eq!(linked_issue_number("Resolved #100 and more"), Some(100));
-        assert_eq!(linked_issue_number("This does not close anything"), None);
-        // `closely` must not be mistaken for `close`.
-        assert_eq!(linked_issue_number("closely #3"), None);
+        fn same(number: u64) -> Option<IssueRef> {
+            Some(IssueRef {
+                repository: None,
+                number,
+            })
+        }
+
+        assert_eq!(linked_issue_ref("Fixes #42"), same(42));
+        assert_eq!(linked_issue_ref("closes: #7"), same(7));
+        assert_eq!(linked_issue_ref("Resolved #100 and more"), same(100));
+        assert_eq!(linked_issue_ref("This does not close anything"), None);
+        // `closely` / `fixedly` must not be mistaken for closing keywords.
+        assert_eq!(linked_issue_ref("closely #3"), None);
+        assert_eq!(linked_issue_ref("fixedly #3"), None);
         // The first keyword wins.
-        assert_eq!(linked_issue_number("Fixes #3, closes #4"), Some(3));
+        assert_eq!(linked_issue_ref("Fixes #3, closes #4"), same(3));
+        // A repository-qualified reference keeps its owner/repo so a
+        // cross-repository issue can be linked, not just its number.
+        assert_eq!(
+            linked_issue_ref("Fixes other/repo#8"),
+            Some(IssueRef {
+                repository: Some("other/repo".into()),
+                number: 8,
+            })
+        );
+        assert_eq!(
+            linked_issue_ref("closes group/sub/proj#9."),
+            Some(IssueRef {
+                repository: Some("group/sub/proj".into()),
+                number: 9,
+            })
+        );
+        // Surrounding punctuation is ignored.
+        assert_eq!(linked_issue_ref("fixes (#11)"), same(11));
+        // A URL fragment is not a closing reference.
+        assert_eq!(linked_issue_ref("fixes https://example.com/page#12"), None);
+    }
+
+    #[test]
+    fn conversation_key_uses_linked_issue_repository() {
+        let mut message = ForgeMessage {
+            forge: ForgeKind::Forgejo,
+            location: Url::parse("http://forge.local/a/b/issues/12").unwrap(),
+            body: String::new(),
+            author: "u".into(),
+            repository: "a/b".into(),
+            comment_id: None,
+            number: Some(12),
+            is_pull_request: true,
+            linked_issue: Some(IssueRef {
+                repository: Some("other/repo".into()),
+                number: 5,
+            }),
+            event: "issue_comment".into(),
+            title: None,
+        };
+        assert_eq!(message.conversation_key(), "forgejo:other/repo:5");
+
+        message.linked_issue = Some(IssueRef {
+            repository: None,
+            number: 5,
+        });
+        assert_eq!(message.conversation_key(), "forgejo:a/b:5");
     }
 
     #[test]
