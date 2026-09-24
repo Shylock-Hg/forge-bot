@@ -124,6 +124,12 @@ impl CommandAgent {
         &self.program
     }
 
+    /// Arguments the adapter will pass to the program (including defaults and
+    /// any applied overrides).
+    pub fn arguments(&self) -> &[String] {
+        &self.args
+    }
+
     /// Build the prompt handed to the agent.
     fn prompt_text(&self, request: &AgentRequest, context: &AgentContext) -> String {
         let mut prompt = String::new();
