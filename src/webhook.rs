@@ -88,6 +88,27 @@ impl RecentComments {
     }
 }
 
+/// Stable key used to ignore duplicate deliveries. Comments use their id;
+/// description events use the issue number plus a hash of the body, so an edit
+/// that changes the text is treated as a new delivery but a re-delivery is not.
+fn delivery_key(message: &crate::forge::ForgeMessage) -> String {
+    match message.comment_id {
+        Some(id) => format!("{}:{}:c{id}", message.forge, message.repository),
+        None => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(message.body.as_bytes());
+            let digest = hex::encode(hasher.finalize());
+            format!(
+                "{}:{}:d{}:{digest}",
+                message.forge,
+                message.repository,
+                message.number.unwrap_or_default()
+            )
+        }
+    }
+}
+
 /// Build the axum router.
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -153,12 +174,10 @@ async fn receive(
             continue;
         };
 
-        if let Some(comment_id) = message.comment_id {
-            let dedupe_key = format!("{}:{}:{comment_id}", message.forge, message.repository);
-            if state.seen(&dedupe_key) {
-                tracing::debug!(%dedupe_key, "ignoring duplicate webhook delivery");
-                continue;
-            }
+        let dedupe_key = delivery_key(&message);
+        if state.seen(&dedupe_key) {
+            tracing::debug!(%dedupe_key, "ignoring duplicate webhook delivery");
+            continue;
         }
 
         let agent_name = mention
@@ -203,5 +222,33 @@ mod tests {
         assert!(!recent.insert("b"));
         assert!(!recent.insert("c"));
         assert!(!recent.insert("a")); // evicted
+    }
+
+    #[test]
+    fn delivery_key_uses_id_or_body_hash() {
+        use crate::location::ForgeKind;
+        use url::Url;
+
+        let base = |comment_id, body: &str| crate::forge::ForgeMessage {
+            forge: ForgeKind::Forgejo,
+            location: Url::parse("http://forge.local/a/b/issues/3").unwrap(),
+            body: body.to_owned(),
+            author: "u".into(),
+            repository: "a/b".into(),
+            comment_id,
+            number: Some(3),
+            is_pull_request: false,
+            event: "issues".into(),
+            title: None,
+        };
+
+        // Comments key on their id.
+        assert_eq!(delivery_key(&base(Some(5), "hi")), "forgejo:a/b:c5");
+
+        // Descriptions key on the body, so an edit is a new delivery but a
+        // re-delivery of the same text is not.
+        let first = delivery_key(&base(None, "@agent do it"));
+        assert_eq!(first, delivery_key(&base(None, "@agent do it")));
+        assert_ne!(first, delivery_key(&base(None, "@agent do it now")));
     }
 }

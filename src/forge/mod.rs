@@ -203,6 +203,114 @@ pub(crate) fn parse_comment_payload(
     }])
 }
 
+/// Parse an `issues` / `pull_request` payload where the mention is in the
+/// issue or pull-request description rather than a comment.
+pub(crate) fn parse_description_payload(
+    forge: ForgeKind,
+    base_url: &str,
+    body: &[u8],
+    event: &str,
+) -> Result<Vec<ForgeMessage>> {
+    use serde_json::Value;
+
+    let payload: Value = serde_json::from_slice(body)?;
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("opened");
+    // Only react to creation/edits; ignore close, label, milestone, ...
+    if !matches!(action, "opened" | "created" | "edited" | "") {
+        return Ok(Vec::new());
+    }
+
+    let object = payload.get("issue").or_else(|| payload.get("pull_request"));
+    let Some(object) = object else {
+        return Ok(Vec::new());
+    };
+    let Some(body_text) = object.get("body").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    if body_text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repository = payload.get("repository").ok_or_else(|| {
+        crate::error::BotError::InvalidPayload("missing `repository` object".into())
+    })?;
+    let full_name = repository
+        .get("full_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            crate::error::BotError::InvalidPayload("missing repository.full_name".into())
+        })?;
+
+    let is_pull_request = payload.get("pull_request").is_some() || event.contains("pull_request");
+    let author = object
+        .get("user")
+        .or_else(|| payload.get("sender"))
+        .and_then(|u| u.get("login"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let number = object.get("number").and_then(Value::as_u64);
+    let title = object
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    let location = description_location(
+        base_url,
+        repository,
+        object,
+        full_name,
+        number,
+        is_pull_request,
+    )?;
+
+    Ok(vec![ForgeMessage {
+        forge,
+        location,
+        body: body_text.to_owned(),
+        author,
+        repository: full_name.to_owned(),
+        comment_id: None,
+        number,
+        is_pull_request,
+        event: event.to_owned(),
+        title,
+    }])
+}
+
+fn description_location(
+    base_url: &str,
+    repository: &serde_json::Value,
+    object: &serde_json::Value,
+    full_name: &str,
+    number: Option<u64>,
+    is_pull_request: bool,
+) -> Result<Url> {
+    if let Some(url) = object
+        .get("html_url")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| Url::parse(s).ok())
+    {
+        return Ok(url);
+    }
+
+    let base = repository
+        .get("html_url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{base_url}/{full_name}"));
+    let resource = if is_pull_request { "pulls" } else { "issues" };
+    Url::parse(&format!("{base}/{resource}/{}", number.unwrap_or_default())).map_err(|e| {
+        crate::error::BotError::InvalidLocation {
+            location: full_name.to_owned(),
+            reason: e.to_string(),
+        }
+    })
+}
+
 /// Build the canonical location URL for a comment.
 fn build_location(
     base_url: &str,

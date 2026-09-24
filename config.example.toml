@@ -97,8 +97,9 @@ no_session = true
 
 # --- polling ingester -------------------------------------------------------
 #
-# Use when the bot account cannot create a repository webhook. Consumes the
-# same pipeline but discovers mentions through the issue-comments API.
+# Webhook delivery is the default/recommended trigger. Enable the poller only
+# when the bot account cannot create a hook; it consumes the same pipeline and
+# discovers mentions through the issue-comments API instead.
 [poller]
 enabled = false
 interval_secs = 15

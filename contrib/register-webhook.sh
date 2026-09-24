@@ -21,7 +21,12 @@
 #   ORG                     organization name, when SCOPE=org
 #   BOT_URL                 Hook target (default
 #                           http://127.0.0.1:8080/webhooks/forgejo)
-#   EVENTS                  JSON event list (default ["issue_comment"])
+#   EVENTS                  JSON event list (default below)
+#   HOOK_ID                 Update this existing hook (PATCH) instead of
+#                           creating a new one
+#
+# Default events: ["issue_comment", "pull_request_review_comment", "issues",
+#                  "pull_request"]
 #
 # Scope requirements (scope + role):
 #   user    write:user (covers every repository owned by the token's user)
@@ -39,7 +44,8 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCOPE="${SCOPE:-user}"
 FORGEJO_URL="${FORGEJO_URL:-http://127.0.0.1:3000}"
 BOT_URL="${BOT_URL:-http://127.0.0.1:8080/webhooks/forgejo}"
-EVENTS="${EVENTS:-[\"issue_comment\"]}"
+EVENTS="${EVENTS:-[\"issue_comment\",\"pull_request_review_comment\",\"issues\",\"pull_request\"]}"
+HOOK_ID="${HOOK_ID:-}"
 
 case "$SCOPE" in
     repo)
@@ -75,10 +81,19 @@ payload=$(
         "$EVENTS" "$BOT_URL" "$FORGEJO_WEBHOOK_SECRET"
 )
 
-echo "Creating $SCOPE webhook for $target -> $BOT_URL"
+if [[ -n "$HOOK_ID" ]]; then
+    method="PATCH"
+    endpoint="$endpoint/$HOOK_ID"
+    action="Updating"
+else
+    method="POST"
+    action="Creating"
+fi
+
+echo "$action $SCOPE webhook for $target -> $BOT_URL"
 
 response=$(
-    curl -sS -w '\n%{http_code}' -X POST \
+    curl -sS -w '\n%{http_code}' -X "$method" \
         -H "Authorization: token $FORGEJO_TOKEN" \
         -H "Content-Type: application/json" \
         "$endpoint" \
@@ -93,7 +108,7 @@ if [[ "$status" != 2* ]]; then
     exit 1
 fi
 
-echo "Webhook created ($target)."
+echo "Webhook $([[ -n "$HOOK_ID" ]] && echo updated || echo created) ($target)."
 if [[ "$SCOPE" == "user" || "$SCOPE" == "system" ]]; then
     echo "This hook covers repositories created later too."
 else

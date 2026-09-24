@@ -91,7 +91,14 @@ SCOPE=system ./contrib/register-webhook.sh
 ```
 
 It validates its inputs and prints the required scope/role when Forgejo
-rejects the request.
+rejects the request. Set `HOOK_ID=<id>` to `PATCH` an existing hook instead of
+creating a new one (useful after changing `EVENTS`):
+
+```bash
+# list hooks to find the id, then update it
+curl -s -H "Authorization: token $TOKEN" "$FORGEJO_URL/api/v1/user/hooks"
+HOOK_ID=3 ./contrib/register-webhook.sh
+```
 
 ---
 
@@ -175,12 +182,13 @@ ones that can carry a mention:
 | Event | Payload | forge-bot status |
 | --- | --- | --- |
 | `issue_comment` | issue + PR conversation comments | handled |
-| `pull_request_review_comment` | inline review comments | routed; payload parsing TBD |
-| `issues` | issue opened/edited (description) | not handled yet |
-| `pull_request` | PR opened/edited (description) | not handled yet |
+| `pull_request_review_comment` | inline review comments | handled |
+| `issues` | issue opened/edited (description) | handled |
+| `pull_request` | PR opened/edited (description) | handled |
 
-Extra events are still accepted (`202` with `accepted: 0`) and ignored until
-their parsing is added.
+Description events are deduplicated by a hash of the body, so an edit that
+changes the text triggers once while re-deliveries of the same text are
+ignored. Other events are accepted (`202` with `accepted: 0`) and ignored.
 
 ---
 
