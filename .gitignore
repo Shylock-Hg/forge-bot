@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+forge-bot.toml
+/config.toml
+/state/
+*.state/

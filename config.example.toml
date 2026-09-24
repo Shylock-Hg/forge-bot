@@ -1,0 +1,81 @@
+# Example configuration for forge-bot.
+#
+# Copy to `forge-bot.toml` and adjust. Secrets can be supplied through the
+# environment instead of this file:
+#
+#   FORGEJO_WEBHOOK_SECRET, FORGEJO_TOKEN, FORGEJO_BASE_URL,
+#   FORGEJO_BOT_USERNAME, FORGE_BOT_BIND, FORGE_BOT_MENTION,
+#   FORGE_BOT_DEFAULT_AGENT, FORGE_BOT_MAX_CONCURRENCY,
+#   FORGE_BOT_WORKSPACE_ROOT, FORGE_BOT_SESSION_DIR
+
+bind = "0.0.0.0:8080"
+mention = "@agent"
+default_agent = "codex"
+
+[forgejo]
+base_url = "http://forgejo.example.com:3000"
+# webhook_secret = "change-me"
+# token = "change-me"
+bot_username = "forge-bot"
+
+[policy]
+# `allow_all = true` disables authorization entirely. Use only for local
+# testing.
+allow_all = false
+# A user is allowed when it appears here; an empty list means "any user".
+allowed_users = ["admin"]
+# A repository is allowed when it appears here; an empty list means "any repo".
+# At least one of the two lists must be non-empty unless `allow_all` is set.
+allowed_repos = ["org/repo"]
+
+[workspace]
+# Clone the repository before invoking an agent.
+enabled = true
+root = "/var/lib/forge-bot/workspaces"
+reuse = true
+git_author_name = "forge-bot"
+git_author_email = "forge-bot@localhost"
+
+[reply]
+# Post "on it" when a job starts.
+ack = true
+# Post the result when a job finishes. Disable if agents reply themselves.
+result = true
+
+[session]
+dir = "/var/lib/forge-bot/state"
+workers = 2
+queue_capacity = 256
+recover = true
+
+# --- agents -----------------------------------------------------------------
+#
+# Each adapter has sensible defaults; any field can be overridden. A custom
+# adapter only needs a `command`.
+
+[agents.codex]
+timeout_secs = 1800
+# dangerously_skip_permissions = false
+
+[agents.pi]
+command = "pi"
+args = ["--print", "--mode", "text"]
+timeout_secs = 1800
+
+[agents.claude]
+command = "claude"
+args = ["--print"]
+timeout_secs = 1800
+
+# [agents.kimi]
+# command = "kimi"
+# args = ["--print"]
+
+# A completely custom adapter:
+# [agents.my-agent]
+# command = "my-agent"
+# args = ["--non-interactive"]
+# prompt = "stdin" # or "arg"
+# timeout_secs = 3600
+# [agents.my-agent.env]
+# MY_AGENT_FLAG = "1"

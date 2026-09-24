@@ -1,0 +1,38 @@
+//! Job queue and session persistence.
+//!
+//! A webhook creates a [`Job`]. Jobs are queued, persisted to disk (so a crash
+//! or restart does not lose them), and executed by a bounded pool of workers.
+//! Each repository/issue pair gets a [`Session`](store::Session) that groups
+//! successive runs, which is what makes follow-up mentions in the same thread
+//! feel like a conversation.
+
+pub mod queue;
+pub mod store;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::forge::ForgeMessage;
+use crate::mention::Mention;
+
+pub use queue::Dispatcher;
+pub use store::{RunRecord, Session, SessionStore};
+
+/// One unit of work handed to an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub id: Uuid,
+    pub message: ForgeMessage,
+    pub mention: Mention,
+    /// Resolved agent name.
+    pub agent: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Job {
+    /// Stable key identifying the conversation, used for session persistence.
+    pub fn session_key(&self) -> String {
+        SessionStore::key(&self.message)
+    }
+}
