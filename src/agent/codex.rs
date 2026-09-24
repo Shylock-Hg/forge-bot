@@ -25,28 +25,41 @@ pub fn default_agent() -> CommandAgent {
 
 /// Build a Codex adapter, applying user overrides.
 pub fn build(config: &AgentConfig, sessions: Arc<SessionStore>) -> CommandAgent {
-    let agent = default_agent().apply_config(config).session(
+    let agent = default_agent().apply_config(config);
+    let bypass = agent.dangerously_skip_permissions_enabled();
+    let agent = if bypass {
+        agent.arg("--dangerously-bypass-approvals-and-sandbox")
+    } else {
+        agent.args(["--sandbox", "workspace-write"])
+    };
+
+    // `codex exec resume` rejects `--color`/`--sandbox`, so the resume command
+    // stands alone and inherits the sandbox recorded on the session.
+    let mut resume_args = vec![
+        "exec".into(),
+        "resume".into(),
+        "{session}".into(),
+        "--skip-git-repo-check".into(),
+        "-o".into(),
+        "{reply_file}".into(),
+    ];
+    if bypass {
+        resume_args.push("--dangerously-bypass-approvals-and-sandbox".into());
+    }
+
+    agent.session(
         SessionStyle {
             // A fresh conversation reports its id on stdout as `thread.started`
             // and writes the final message to `-o`.
             create_args: vec!["--json".into(), "-o".into(), "{reply_file}".into()],
-            resume_args: vec![
-                "resume".into(),
-                "{session}".into(),
-                "-o".into(),
-                "{reply_file}".into(),
-            ],
-            resume_at: Some(1),
+            resume_args,
+            resume_at: None,
             reply_from_file: true,
             capture_id: true,
+            replace_on_resume: true,
         },
         sessions,
-    );
-    if agent.dangerously_skip_permissions_enabled() {
-        agent.arg("--dangerously-bypass-approvals-and-sandbox")
-    } else {
-        agent.args(["--sandbox", "workspace-write"])
-    }
+    )
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ pub fn build(config: &AgentConfig, sessions: Arc<SessionStore>) -> CommandAgent 
             resume_at: None,
             reply_from_file: false,
             capture_id: false,
+            replace_on_resume: false,
         },
         sessions,
     );

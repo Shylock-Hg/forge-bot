@@ -58,6 +58,10 @@ pub struct SessionStyle {
     pub reply_from_file: bool,
     /// Discover the new session id in `--json` output (`codex`).
     pub capture_id: bool,
+    /// On resume, ignore the base args and use `resume_args` alone. Needed
+    /// when the resume subcommand rejects flags the base command accepts
+    /// (`codex exec resume` has no `--color`/`--sandbox`).
+    pub replace_on_resume: bool,
 }
 
 /// Resolved session arguments for one invocation.
@@ -73,6 +77,8 @@ struct SessionPlan {
     persist: Option<(String, String)>,
     /// Conversation whose captured id should be remembered on success.
     capture: Option<String>,
+    /// Drop the base args and use `args` alone (resume subcommands).
+    replace_base: bool,
 }
 
 /// Substitute `{session}` / `{reply_file}` into a session arg template.
@@ -198,6 +204,7 @@ impl CommandAgent {
             Some(id) => {
                 plan.args = interpolate(&style.resume_args, &id, reply.as_deref());
                 plan.at = style.resume_at;
+                plan.replace_base = style.replace_on_resume;
             }
             None => {
                 let id = if style.capture_id {
@@ -325,7 +332,11 @@ impl Agent for CommandAgent {
         let prompt = self.prompt_text(request, context);
         let started = Instant::now();
         let plan = self.session_plan(context);
-        let mut args = self.args.clone();
+        let mut args = if plan.replace_base {
+            Vec::new()
+        } else {
+            self.args.clone()
+        };
         match plan.at {
             Some(at) => {
                 let at = at.min(args.len());
@@ -618,6 +629,7 @@ mod tests {
                     resume_at: None,
                     reply_from_file: false,
                     capture_id: false,
+                    replace_on_resume: false,
                 },
                 Arc::clone(&store),
             );
@@ -677,14 +689,16 @@ if out:
                 SessionStyle {
                     create_args: vec!["--json".into(), "-o".into(), "{reply_file}".into()],
                     resume_args: vec![
+                        "exec".into(),
                         "resume".into(),
                         "{session}".into(),
                         "-o".into(),
                         "{reply_file}".into(),
                     ],
-                    resume_at: Some(1),
+                    resume_at: None,
                     reply_from_file: true,
                     capture_id: true,
+                    replace_on_resume: true,
                 },
                 Arc::clone(&store),
             );
