@@ -36,13 +36,13 @@ impl AppState {
     pub fn new(
         config: Arc<Config>,
         adapters: std::collections::HashMap<String, Arc<dyn ForgeAdapter>>,
-        agents: AgentRegistry,
+        agents: Arc<AgentRegistry>,
         dispatcher: Arc<Dispatcher>,
     ) -> Self {
         Self {
             config,
             adapters: Arc::new(adapters),
-            agents: Arc::new(agents),
+            agents,
             dispatcher,
             dedupe: Arc::new(Mutex::new(RecentComments::new(1024))),
         }

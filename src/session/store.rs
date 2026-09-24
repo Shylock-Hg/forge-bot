@@ -121,17 +121,27 @@ impl SessionStore {
         Ok(session.clone())
     }
 
-    /// Record the outcome of a run.
-    pub fn finish(&self, key: &str, job_id: Uuid, outcome: &AgentOutcome) -> Result<()> {
+    /// Record the outcome of a run. `agent` is the adapter that actually ran,
+    /// which may differ from the requested one when the dispatcher fell back
+    /// after a capacity error.
+    pub fn finish(
+        &self,
+        key: &str,
+        job_id: Uuid,
+        agent: &str,
+        outcome: &AgentOutcome,
+    ) -> Result<()> {
         let mut sessions = self.sessions.lock().expect("session mutex poisoned");
         let Some(session) = sessions.get_mut(key) else {
             return Ok(());
         };
         if let Some(run) = session.runs.iter_mut().find(|r| r.job_id == job_id) {
+            run.agent = agent.to_owned();
             run.finished_at = Some(Utc::now());
             run.success = Some(outcome.success);
             run.summary = Some(outcome.summary.clone());
         }
+        session.agent = agent.to_owned();
         session.updated_at = Utc::now();
         self.persist_locked(session)?;
         Ok(())
@@ -261,12 +271,14 @@ mod tests {
             .finish(
                 &key,
                 job.id,
+                "pi",
                 &AgentOutcome::success("done", Duration::from_millis(5)),
             )
             .unwrap();
 
         let stored = store.get(&key).unwrap();
         assert_eq!(stored.runs[0].success, Some(true));
+        assert_eq!(stored.runs[0].agent, "pi");
         assert_eq!(stored.runs[0].summary.as_deref(), Some("done"));
     }
 

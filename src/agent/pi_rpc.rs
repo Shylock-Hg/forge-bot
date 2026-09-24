@@ -732,9 +732,18 @@ for line in sys.stdin:
         };
 
         let first = spawn(Arc::clone(&agent));
-        // Let the first request spawn and bind its agent.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let bound = agent.conversation_binding(&key).expect("bound agent");
+        // Wait for the first request to spawn and bind its agent. Poll
+        // instead of sleeping a fixed amount, so the test is not
+        // timing-sensitive when the suite runs under load.
+        let mut bound = None;
+        for _ in 0..500 {
+            if let Some(id) = agent.conversation_binding(&key) {
+                bound = Some(id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let bound = bound.expect("agent should be bound to the thread");
         assert_eq!(agent.live_agents(), 1);
 
         // The second request is for the same thread. It must wait for the

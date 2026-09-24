@@ -98,20 +98,15 @@ pub fn build_app(config: Config) -> Result<AppState> {
     let config = Arc::new(config);
 
     let adapters = build_adapters(&config);
-    let agents = AgentRegistry::from_config(&config);
+    let agents = Arc::new(AgentRegistry::from_config(&config));
     let policy = build_policy(&config);
     let sessions = Arc::new(SessionStore::open(config::expand_tilde(
         &config.session.dir,
     ))?);
     let api = Arc::new(HttpForgeApi::new((*config).clone())?);
-    let dispatcher = Dispatcher::new(config.clone(), agents, sessions, api, policy)?;
+    let dispatcher = Dispatcher::new(config.clone(), agents.clone(), sessions, api, policy)?;
 
-    Ok(AppState::new(
-        config.clone(),
-        adapters,
-        AgentRegistry::from_config(&config),
-        dispatcher,
-    ))
+    Ok(AppState::new(config.clone(), adapters, agents, dispatcher))
 }
 
 /// Run the webhook server until the process is stopped.

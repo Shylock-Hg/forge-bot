@@ -68,21 +68,17 @@ fn harness(dir: &std::path::Path) -> Harness {
     let adapters = forge_bot::build_adapters(&config);
     let policy = forge_bot::build_policy(&config);
     let sessions = Arc::new(SessionStore::open(dir).unwrap());
+    let agents = Arc::new(AgentRegistry::from_config(&config));
     let dispatcher = Dispatcher::new(
         config.clone(),
-        AgentRegistry::from_config(&config),
+        agents.clone(),
         sessions.clone(),
         Arc::new(NoopForgeApi),
         policy,
     )
     .unwrap();
 
-    let state = forge_bot::webhook::AppState::new(
-        config.clone(),
-        adapters,
-        AgentRegistry::from_config(&config),
-        dispatcher,
-    );
+    let state = forge_bot::webhook::AppState::new(config.clone(), adapters, agents, dispatcher);
 
     Harness {
         app: forge_bot::webhook::router(state),

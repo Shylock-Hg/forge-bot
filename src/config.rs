@@ -30,6 +30,10 @@ pub struct Config {
     pub reply: ReplyConfig,
     pub session: SessionConfig,
     pub agents: AgentConfigs,
+    /// Behaviour when an agent hits a quota, rate or capacity limit.
+    /// `[quota]` is accepted as a backwards-compatible alias.
+    #[serde(alias = "quota")]
+    pub capacity: CapacityConfig,
     /// Long-lived Pi RPC agent pool (`pi-rpc` adapter).
     pub pi_rpc: PiRpcConfig,
     /// Forge polling ingester, used when webhooks cannot be configured.
@@ -48,6 +52,7 @@ impl Default for Config {
             reply: ReplyConfig::default(),
             session: SessionConfig::default(),
             agents: AgentConfigs::default(),
+            capacity: CapacityConfig::default(),
             pi_rpc: PiRpcConfig::default(),
             poller: PollerConfig::default(),
         }
@@ -93,6 +98,7 @@ impl Config {
         self.policy.ensure_defaults();
         self.workspace.ensure_defaults();
         self.session.ensure_defaults();
+        self.capacity.ensure_defaults();
         if self.pi_rpc.command.is_empty() {
             self.pi_rpc.command = "pi".to_owned();
         }
@@ -450,6 +456,45 @@ pub enum PromptDelivery {
     Arg,
 }
 
+/// How the dispatcher reacts when an agent hits a capacity limit.
+///
+/// A failed run whose output looks like a quota, rate-limit or
+/// capacity/overload message (see [`crate::agent::capacity`]) marks that agent
+/// as unavailable for `cooldown_secs` and, when `fallback` is enabled, retries
+/// the job with the next available agent. If no agent is available the bot
+/// replies `No available agent`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapacityConfig {
+    /// Retry a job on another available agent when the chosen one is at
+    /// capacity. When false the job simply fails and the agent is still
+    /// skipped for `cooldown_secs`.
+    pub fallback: bool,
+    /// How long (seconds) an agent is skipped after it reports a limit.
+    pub cooldown_secs: u64,
+    /// Extra, case-insensitive substrings that count as a capacity message, in
+    /// addition to the built-in markers.
+    pub markers: Vec<String>,
+}
+
+impl Default for CapacityConfig {
+    fn default() -> Self {
+        Self {
+            fallback: true,
+            cooldown_secs: 3600,
+            markers: Vec::new(),
+        }
+    }
+}
+
+impl CapacityConfig {
+    fn ensure_defaults(&mut self) {
+        if self.cooldown_secs == 0 {
+            self.cooldown_secs = 3600;
+        }
+    }
+}
+
 /// Configuration for the long-lived Pi RPC agent pool.
 ///
 /// Unlike the one-shot `pi` adapter, `pi-rpc` keeps `pi --mode rpc`
@@ -590,6 +635,11 @@ bot_username = "botty"
 [policy]
 allowed_users = ["alice"]
 
+[capacity]
+fallback = false
+cooldown_secs = 120
+markers = ["no tokens left"]
+
 [agents.codex]
 command = "codex"
 args = ["exec", "-"]
@@ -601,6 +651,23 @@ timeout_secs = 60
         let forgejo = config.forges.forgejo.unwrap();
         assert_eq!(forgejo.base_url, "https://forge.example.com");
         assert_eq!(config.agents.get("codex").unwrap().timeout_secs, Some(60));
+        assert!(!config.capacity.fallback);
+        assert_eq!(config.capacity.cooldown_secs, 120);
+        assert_eq!(config.capacity.markers, vec!["no tokens left".to_owned()]);
+    }
+
+    #[test]
+    fn accepts_quota_as_an_alias_for_capacity() {
+        let raw = r#"
+[quota]
+fallback = true
+cooldown_secs = 42
+markers = ["overloaded"]
+"#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert!(config.capacity.fallback);
+        assert_eq!(config.capacity.cooldown_secs, 42);
+        assert_eq!(config.capacity.markers, vec!["overloaded".to_owned()]);
     }
 
     #[test]

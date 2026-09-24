@@ -218,13 +218,21 @@ impl Agent for CommandAgent {
             })?;
 
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(prompt_for_spawn.as_bytes())
-                    .await
-                    .map_err(|e| BotError::Agent {
-                        name: name.clone(),
-                        reason: format!("failed to write prompt to stdin: {e}"),
-                    })?;
+                if let Err(error) = stdin.write_all(prompt_for_spawn.as_bytes()).await {
+                    // A one-shot command may exit before reading its prompt,
+                    // which surfaces as a broken pipe. That is not itself a
+                    // failure: the child's exit status and output are what
+                    // matter, so carry on and let `wait_with_output` decide.
+                    if !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    ) {
+                        return Err(BotError::Agent {
+                            name: name.clone(),
+                            reason: format!("failed to write prompt to stdin: {error}"),
+                        });
+                    }
+                }
                 // Dropping stdin signals EOF to the child.
                 drop(stdin);
             }

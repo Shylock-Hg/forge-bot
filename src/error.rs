@@ -58,4 +58,12 @@ impl BotError {
     pub fn is_permission_denied(&self) -> bool {
         matches!(self, BotError::ForgePermissionDenied(_))
     }
+
+    /// Whether the agent process could not even be started (its binary is not
+    /// installed, the command is wrong, ...). Such an adapter should be
+    /// skipped in favour of the next available one, exactly like a capacity
+    /// limit.
+    pub fn is_agent_unavailable(&self) -> bool {
+        matches!(self, BotError::Agent { reason, .. } if reason.starts_with("failed to spawn"))
+    }
 }

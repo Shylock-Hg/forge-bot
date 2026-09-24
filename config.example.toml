@@ -42,6 +42,19 @@ ack = true
 # Post the result when a job finishes. Disable if agents reply themselves.
 result = true
 
+[capacity]
+# When an agent's output looks like a quota, rate-limit or capacity/overload
+# error, mark it unavailable for `cooldown_secs` and (if `fallback` is true)
+# retry the job on the next available agent. When no agent is left the bot
+# replies "No available agent". `[quota]` is accepted as an alias.
+fallback = true
+cooldown_secs = 3600
+# Extra, case-insensitive phrases that count as a capacity message, in
+# addition to the built-in markers ("usage limit", "rate limit", "too many
+# requests", "quota exceeded", "overloaded", "at capacity", "503 Service
+# Unavailable", ...).
+markers = []
+
 [session]
 dir = "/var/lib/forge-bot/state"
 workers = 2

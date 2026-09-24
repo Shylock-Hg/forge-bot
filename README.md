@@ -98,7 +98,7 @@ Implemented:
 - [x] GitHub and GitLab adapters
 - [x] Per-user systemd service (no root)
 - [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
-- [x] Conversation affinity: one issue/PR thread stays on one agent instance, with stale bindings evicted
+- [x] Agent capacity / quota handling: a failed run that looks like a usage limit, rate limit or provider overload marks the agent unavailable for a cooldown and the job is retried on another available agent (adapters that cannot even start are skipped too); when none is left the bot replies `No available agent`
 
 Still open (see the issue's roadmap):
 
@@ -156,6 +156,7 @@ most important options:
 | `[workspace]` | Whether to clone a checkout, and where. |
 | `[reply]` | Whether the gateway posts ack/result comments. |
 | `[session]` | Queue/state directory, worker count, recovery. |
+| `[capacity]` | Capacity/quota detection: `fallback`, `cooldown_secs`, extra `markers` (`[quota]` is an alias). |
 | `[agents.<name>]` | Per-agent `command`, `args`, `prompt`, `timeout_secs`, `env`. |
 
 Configuration is loaded from `FORGE_BOT_CONFIG` (or `--config`), falling back to

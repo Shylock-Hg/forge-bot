@@ -4,8 +4,9 @@
 //! request. The four built-ins (Codex, Pi, Claude Code, Kimi) are always
 //! available and can be overridden or extended from configuration.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::agent::command::CommandAgent;
 use crate::agent::pi_rpc::PiPoolAgent;
@@ -17,9 +18,16 @@ use crate::error::{BotError, Result};
 pub const BUILTIN_AGENTS: &[&str] = &["codex", "pi", "pi-rpc", "claude", "kimi"];
 
 /// Resolves agent names to adapters.
+///
+/// The registry also remembers which agents are temporarily unavailable
+/// because they reported a quota, rate or capacity error. That state is shared
+/// by every clone of the [`Arc`] the dispatcher and the HTTP layer hold, so a
+/// capacity hit on one job makes later jobs skip the agent too.
 pub struct AgentRegistry {
     agents: BTreeMap<String, Arc<dyn Agent>>,
     default: String,
+    /// Agent name -> instant at which it may be tried again.
+    unavailable: Mutex<HashMap<String, Instant>>,
 }
 
 impl AgentRegistry {
@@ -76,7 +84,11 @@ impl AgentRegistry {
                 .unwrap_or_else(|| "codex".to_owned())
         };
 
-        Self { agents, default }
+        Self {
+            agents,
+            default,
+            unavailable: Mutex::new(HashMap::new()),
+        }
     }
 
     /// The configured default agent name.
@@ -104,6 +116,54 @@ impl AgentRegistry {
     pub fn names(&self) -> Vec<String> {
         self.agents.keys().cloned().collect()
     }
+
+    /// Mark an agent unavailable until `cooldown` has elapsed.
+    pub fn mark_unavailable(&self, name: &str, cooldown: Duration) {
+        let until = Instant::now() + cooldown;
+        self.unavailable
+            .lock()
+            .expect("agent availability mutex poisoned")
+            .insert(name.to_owned(), until);
+        tracing::warn!(
+            agent = %name,
+            retry_after_secs = cooldown.as_secs(),
+            "agent marked unavailable"
+        );
+    }
+
+    /// Clear an agent's cooldown, making it eligible again immediately.
+    pub fn mark_available(&self, name: &str) {
+        self.unavailable
+            .lock()
+            .expect("agent availability mutex poisoned")
+            .remove(name);
+    }
+
+    /// Whether an agent may currently be used. Expired entries are forgotten.
+    pub fn is_available(&self, name: &str) -> bool {
+        let now = Instant::now();
+        let mut unavailable = self
+            .unavailable
+            .lock()
+            .expect("agent availability mutex poisoned");
+        match unavailable.get(name).copied() {
+            Some(until) if until > now => false,
+            Some(_) => {
+                unavailable.remove(name);
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// Names of the agents that are registered and not capacity-limited.
+    pub fn available_names(&self) -> Vec<String> {
+        self.agents
+            .keys()
+            .filter(|name| self.is_available(name))
+            .cloned()
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for AgentRegistry {
@@ -111,6 +171,7 @@ impl std::fmt::Debug for AgentRegistry {
         f.debug_struct("AgentRegistry")
             .field("agents", &self.agents.keys().collect::<Vec<_>>())
             .field("default", &self.default)
+            .field("available", &self.available_names())
             .finish()
     }
 }
@@ -157,5 +218,26 @@ mod tests {
             registry.get("does-not-exist"),
             Err(BotError::UnknownAgent(_))
         ));
+    }
+
+    #[test]
+    fn capacity_limited_agents_are_skipped_until_the_cooldown_expires() {
+        let registry = AgentRegistry::from_config(&Config::default());
+        assert!(registry.is_available("codex"));
+        assert!(registry.available_names().contains(&"codex".to_owned()));
+
+        registry.mark_unavailable("codex", Duration::from_secs(60));
+        assert!(!registry.is_available("codex"));
+        assert!(!registry.available_names().contains(&"codex".to_owned()));
+        // Other agents are unaffected.
+        assert!(registry.available_names().contains(&"pi".to_owned()));
+
+        // An already-expired entry is treated as available again.
+        registry.mark_unavailable("codex", Duration::ZERO);
+        assert!(registry.is_available("codex"));
+
+        registry.mark_unavailable("codex", Duration::from_secs(60));
+        registry.mark_available("codex");
+        assert!(registry.is_available("codex"));
     }
 }
