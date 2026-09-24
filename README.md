@@ -96,7 +96,7 @@ Implemented:
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Bounded job queue + on-disk session/job persistence
 - [x] GitHub and GitLab adapters
-- [x] Per-user systemd service (no root) plus a hardened system-wide unit for a dedicated account
+- [x] Per-user systemd service (no root)
 - [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
 
 Still open (see the issue's roadmap):

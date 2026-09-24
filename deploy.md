@@ -18,9 +18,7 @@ supporting files live in [`contrib/`](contrib/):
 | `contrib/forge-bot.user.service` | systemd **user** unit (recommended) |
 | `contrib/forge-bot.user.toml.example` | Per-user config with `~` state paths |
 | `contrib/install-user.sh` | Install binary + config + user unit, no root needed |
-| `contrib/forge-bot.service` | systemd system unit (dedicated account / admin) |
 | `contrib/forge-bot.env.example` | Environment/secret template |
-| `contrib/install.sh` | System-wide install as root; prefer `install-user.sh` |
 | `contrib/run.sh` | Rootless launcher (`setsid` + `nohup`) |
 | `contrib/detect-repo.sh` | Print `owner/repo` for the current git remote |
 | `contrib/register-webhook.sh` | Create the Forgejo webhook via the API |
@@ -124,17 +122,7 @@ export FORGEJO_TOKEN=...
 kill "$(cat ~/.local/state/forge-bot/forge-bot.pid)"   # stop
 ```
 
-**System-wide service (admin only):** only needed when a dedicated service
-account must own the bot. It installs to `/etc` and `/usr/local` and therefore
-requires root:
-
-```bash
-sudo ./contrib/install.sh
-journalctl -u forge-bot -f
-```
-
-Do not run the bot itself as root. The system unit drops to a service account
-(`User=agent` by default); the user installer never runs as root at all.
+Do not run the bot itself as root; install-user.sh never runs as root at all.
 
 ## 5. Verify
 
@@ -169,8 +157,8 @@ mentions reuse it while it is idle.
 ## 8. This environment
 
 * Bot runs as the `agent` account (which also owns the `pi` auth under
-  `/home/agent/.pi`). Prefer `contrib/install-user.sh` so the service is
-  scoped to that account rather than the whole system.
+  `/home/agent/.pi`). Run it with `contrib/install-user.sh` so the service is
+  scoped to that account.
 * Binary: `~/.local/bin/forge-bot`; config: `~/.config/forge-bot/forge-bot.toml`
   (mode `0600`); state: `~/.local/state/forge-bot/`.
 * `shylock-bot` is only a collaborator, so the webhook cannot be created by the

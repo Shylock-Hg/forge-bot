@@ -1,7 +1,7 @@
 #! /usr/bin/env bash
 #
-# Rootless launcher for forge-bot, for hosts where a system unit cannot be
-# installed. Detaches with setsid + nohup so the bot survives the login shell.
+# Rootless launcher for forge-bot, for hosts where systemd is unavailable.
+# Detaches with setsid + nohup so the bot survives the login shell.
 #
 # Usage:
 #   FORGEJO_TOKEN=... ./contrib/run.sh [config-path]

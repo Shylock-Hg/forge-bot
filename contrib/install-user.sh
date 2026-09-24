@@ -40,7 +40,6 @@ readonly UNIT_DST="$UNIT_DIR/forge-bot.service"
 
 if (( EUID == 0 )); then
     echo "Do not run this installer as root: the service must run as the user." >&2
-    echo "Use contrib/install.sh for a system-wide service instead." >&2
     exit 1
 fi
 
