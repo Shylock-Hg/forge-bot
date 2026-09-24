@@ -41,6 +41,9 @@ pub struct AgentContext {
     pub repository: String,
     pub issue_number: Option<u64>,
     pub is_pull_request: bool,
+    /// Issue a pull request closes, when known. Used only for routing the
+    /// request to a stable agent instance; it is never exposed to the agent.
+    pub linked_issue_number: Option<u64>,
     pub title: Option<String>,
     /// Environment variables carrying forge credentials.
     pub credentials: Vec<(String, String)>,
@@ -131,6 +134,7 @@ mod tests {
             repository: "o/r".into(),
             issue_number: Some(1),
             is_pull_request: false,
+            linked_issue_number: None,
             title: None,
             credentials: vec![("FORGEJO_TOKEN".into(), "secret".into())],
         };

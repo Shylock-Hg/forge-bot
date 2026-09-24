@@ -6,6 +6,7 @@
 //! agent is spawned when none is available. Idle agents are evicted after a
 //! configurable TTL.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -68,8 +69,10 @@ impl PiRpcClient {
             cmd.env_remove(key);
         }
 
-        cmd.current_dir(workspace)
-            .stdin(Stdio::piped())
+        if !workspace.as_os_str().is_empty() {
+            cmd.current_dir(workspace);
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -97,6 +100,11 @@ impl PiRpcClient {
             next_id: 1,
             workspace: workspace.to_path_buf(),
         })
+    }
+
+    /// Process id of the child, while it is alive.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
     }
 
     /// Whether the child is still running.
@@ -235,11 +243,16 @@ impl PiRpcClient {
 #[derive(Default)]
 struct PoolState {
     agents: Vec<PoolEntry>,
+    /// Conversation (issue / pull request) key -> bound agent id. Recorded so
+    /// every fragment of one thread is routed to the same agent instance, and
+    /// reaped together with the agent it points at.
+    conversations: HashMap<String, Uuid>,
 }
 
 struct PoolEntry {
     id: Uuid,
     key: String,
+    pid: Option<u32>,
     workspace: PathBuf,
     client: Option<PiRpcClient>,
     busy: bool,
@@ -254,7 +267,8 @@ struct PoolInner {
 }
 
 impl PoolInner {
-    /// Drop dead or expired idle agents. Callers hold the state lock.
+    /// Drop dead or expired idle agents, and any conversation mapping whose
+    /// agent no longer exists. Callers hold the state lock.
     fn reap(&self, state: &mut PoolState) {
         let ttl = Duration::from_secs(self.config.idle_ttl_secs.max(1));
         state.agents.retain_mut(|entry| {
@@ -277,6 +291,7 @@ impl PoolInner {
                 tracing::info!(
                     key = %entry.key,
                     workspace = %entry.workspace.display(),
+                    pid = ?entry.pid,
                     "evicting idle pi agent"
                 );
                 if let Some(client) = entry.client.as_mut() {
@@ -287,6 +302,17 @@ impl PoolInner {
             }
             true
         });
+
+        // A mapping is stale once its agent is gone. Dropping it lets the next
+        // mention in that thread start a fresh agent instead of waiting for a
+        // process that will never return.
+        let live: HashSet<Uuid> = state.agents.iter().map(|entry| entry.id).collect();
+        let before = state.conversations.len();
+        state.conversations.retain(|_, id| live.contains(id));
+        let evicted = before - state.conversations.len();
+        if evicted > 0 {
+            tracing::debug!(evicted, "evicted stale conversation mappings");
+        }
     }
 
     /// Check out a client for `key`, spawning one if necessary.
@@ -303,34 +329,42 @@ impl PoolInner {
                 let mut state = self.state.lock().expect("pi pool mutex poisoned");
                 self.reap(&mut state);
 
-                if let Some(entry) = state
-                    .agents
-                    .iter_mut()
-                    .find(|entry| entry.key == key && !entry.busy && entry.client.is_some())
-                {
-                    entry.busy = true;
-                    let id = entry.id;
-                    let client = entry.client.take();
-                    tracing::debug!(key, "reusing idle pi agent");
-                    return Ok(PoolGuard {
-                        inner: Arc::clone(self),
-                        id,
-                        client,
-                    });
-                }
-
-                if state.agents.len() < self.config.max_agents {
+                // Conversation affinity: a thread that is already bound to an
+                // agent keeps using that agent, even if it is momentarily
+                // busy. This is what stops two fragments of one issue being
+                // handled by different instances.
+                if let Some(id) = state.conversations.get(key).copied() {
+                    if let Some(entry) = state.agents.iter_mut().find(|entry| entry.id == id) {
+                        if !entry.busy && entry.client.is_some() {
+                            entry.busy = true;
+                            let client = entry.client.take();
+                            tracing::debug!(key, pid = ?entry.pid, "reusing bound pi agent");
+                            return Ok(PoolGuard {
+                                inner: Arc::clone(self),
+                                id,
+                                client,
+                            });
+                        }
+                        // Busy: wait for it to settle below rather than
+                        // spawning a second agent for the same thread.
+                    } else {
+                        state.conversations.remove(key);
+                    }
+                } else if state.agents.len() < self.config.max_agents {
                     let id = Uuid::new_v4();
                     let client = PiRpcClient::spawn(&self.config, workspace, credentials)?;
+                    let pid = client.pid();
                     state.agents.push(PoolEntry {
                         id,
                         key: key.to_owned(),
+                        pid,
                         workspace: workspace.to_path_buf(),
                         client: None,
                         busy: true,
                         last_used: Instant::now(),
                     });
-                    tracing::info!(key, max = self.config.max_agents, "spawned pi agent");
+                    state.conversations.insert(key.to_owned(), id);
+                    tracing::info!(key, pid = ?pid, max = self.config.max_agents, "spawned pi agent");
                     return Ok(PoolGuard {
                         inner: Arc::clone(self),
                         id,
@@ -408,6 +442,7 @@ impl Drop for PoolGuard {
                 };
                 if !kept {
                     state.agents.retain(|entry| entry.id != self.id);
+                    state.conversations.retain(|_, id| *id != self.id);
                 }
             }
         }
@@ -440,6 +475,18 @@ impl PiPoolAgent {
             .agents
             .len()
     }
+
+    /// Agent currently bound to a conversation key, if any. Internal data used
+    /// to keep a thread on one instance; it is never sent to an agent.
+    pub fn conversation_binding(&self, key: &str) -> Option<Uuid> {
+        self.inner
+            .state
+            .lock()
+            .expect("pi pool mutex poisoned")
+            .conversations
+            .get(key)
+            .copied()
+    }
 }
 
 #[async_trait::async_trait]
@@ -450,15 +497,7 @@ impl Agent for PiPoolAgent {
 
     async fn run(&self, request: &AgentRequest, context: &AgentContext) -> Result<AgentOutcome> {
         let started = Instant::now();
-        let key = if context.repository.is_empty() {
-            context.workspace.to_string_lossy().into_owned()
-        } else {
-            format!(
-                "{}#{}",
-                context.repository,
-                context.issue_number.unwrap_or_default()
-            )
-        };
+        let key = conversation_key(context);
 
         let mut guard = self
             .inner
@@ -474,6 +513,31 @@ impl Agent for PiPoolAgent {
                 Ok(AgentOutcome::failure(error.to_string(), started.elapsed()))
             }
         }
+    }
+}
+
+/// Stable conversation key used to pin one thread to one agent instance.
+///
+/// A pull request is folded onto the issue it closes when the description
+/// references one, so both threads share an agent. This is internal routing
+/// data and is deliberately never rendered into the prompt.
+fn conversation_key(context: &AgentContext) -> String {
+    if context.repository.is_empty() {
+        return context.workspace.to_string_lossy().into_owned();
+    }
+    let number = if context.is_pull_request {
+        context.linked_issue_number.or(context.issue_number)
+    } else {
+        context.issue_number
+    };
+    match context.forge {
+        Some(forge) => format!(
+            "{}:{}:{}",
+            forge.as_str(),
+            context.repository,
+            number.unwrap_or_default()
+        ),
+        None => format!("{}:{}", context.repository, number.unwrap_or_default()),
     }
 }
 
@@ -507,6 +571,7 @@ fn build_prompt(request: &AgentRequest, context: &AgentContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::location::ForgeKind;
 
     fn cfg() -> PiRpcConfig {
         PiRpcConfig {
@@ -541,6 +606,7 @@ mod tests {
         state.agents.push(PoolEntry {
             id: Uuid::new_v4(),
             key: "dead".into(),
+            pid: None,
             workspace: PathBuf::from("/tmp"),
             client: None,
             busy: false,
@@ -549,6 +615,7 @@ mod tests {
         state.agents.push(PoolEntry {
             id: Uuid::new_v4(),
             key: "busy".into(),
+            pid: None,
             workspace: PathBuf::from("/tmp"),
             client: None,
             busy: true,
@@ -557,5 +624,151 @@ mod tests {
         agent.inner.reap(&mut state);
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.agents[0].key, "busy");
+    }
+
+    #[test]
+    fn reaps_stale_conversation_mappings() {
+        let agent = PiPoolAgent::new(&cfg());
+        let mut state = agent.inner.state.lock().unwrap();
+        let kept = Uuid::new_v4();
+        state.agents.push(PoolEntry {
+            id: kept,
+            key: "live".into(),
+            pid: None,
+            workspace: PathBuf::from("/tmp"),
+            client: None,
+            busy: true,
+            last_used: Instant::now(),
+        });
+        state.conversations.insert("live".into(), kept);
+        state.conversations.insert("stale".into(), Uuid::new_v4());
+
+        agent.inner.reap(&mut state);
+
+        assert_eq!(state.conversations.len(), 1);
+        assert_eq!(state.conversations.get("live"), Some(&kept));
+        assert!(!state.conversations.contains_key("stale"));
+    }
+
+    /// Minimal `pi --mode rpc` stand-in: answers a prompt after an optional
+    /// delay and serves `get_last_assistant_text`.
+    const FAKE_PI: &str = r#"#!/usr/bin/env python3
+import json, os, sys, time
+
+delay = float(os.environ.get("FAKE_PI_DELAY", "0"))
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    kind = message.get("type")
+    request_id = message.get("id")
+    if kind == "prompt":
+        time.sleep(delay)
+        print(json.dumps({"type": "response", "id": request_id, "success": True}), flush=True)
+        print(json.dumps({"type": "agent_settled"}), flush=True)
+    elif kind == "get_last_assistant_text":
+        print(
+            json.dumps(
+                {
+                    "type": "response",
+                    "id": request_id,
+                    "data": {"text": "fake-result"},
+                }
+            ),
+            flush=True,
+        )
+"#;
+
+    #[tokio::test]
+    async fn same_thread_waits_for_its_agent_instead_of_spawning_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 4,
+            timeout_secs: 10,
+            ..Default::default()
+        };
+        config.env.insert("FAKE_PI_DELAY".into(), "1".into());
+        let agent = Arc::new(PiPoolAgent::new(&config));
+
+        let request = AgentRequest {
+            location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),
+            message: "go".into(),
+        };
+        let context = AgentContext {
+            workspace: dir.path().to_path_buf(),
+            forge: Some(ForgeKind::Forgejo),
+            repository: "o/r".into(),
+            issue_number: Some(1),
+            ..Default::default()
+        };
+        let key = conversation_key(&context);
+
+        let spawn = |agent: Arc<PiPoolAgent>| {
+            let request = request.clone();
+            let context = context.clone();
+            tokio::spawn(async move { agent.run(&request, &context).await })
+        };
+
+        let first = spawn(Arc::clone(&agent));
+        // Let the first request spawn and bind its agent.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let bound = agent.conversation_binding(&key).expect("bound agent");
+        assert_eq!(agent.live_agents(), 1);
+
+        // The second request is for the same thread. It must wait for the
+        // bound agent rather than spawn a second instance.
+        let second = spawn(Arc::clone(&agent));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(agent.live_agents(), 1, "no duplicate agent for one thread");
+        assert_eq!(agent.conversation_binding(&key), Some(bound));
+
+        assert!(first.await.unwrap().unwrap().success);
+        assert!(second.await.unwrap().unwrap().success);
+        assert_eq!(agent.live_agents(), 1);
+        assert_eq!(agent.conversation_binding(&key), Some(bound));
+    }
+
+    #[test]
+    fn conversation_key_folds_pr_onto_linked_issue() {
+        let pr = AgentContext {
+            forge: Some(ForgeKind::Forgejo),
+            repository: "o/r".into(),
+            issue_number: Some(12),
+            is_pull_request: true,
+            linked_issue_number: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(conversation_key(&pr), "forgejo:o/r:5");
+
+        let unlinked = AgentContext {
+            forge: Some(ForgeKind::Forgejo),
+            repository: "o/r".into(),
+            issue_number: Some(12),
+            is_pull_request: true,
+            linked_issue_number: None,
+            ..Default::default()
+        };
+        assert_eq!(conversation_key(&unlinked), "forgejo:o/r:12");
+
+        let issue = AgentContext {
+            forge: Some(ForgeKind::Forgejo),
+            repository: "o/r".into(),
+            issue_number: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(conversation_key(&issue), "forgejo:o/r:5");
     }
 }

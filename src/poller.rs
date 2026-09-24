@@ -377,6 +377,7 @@ fn message_from_comment(repo: &str, comment: &Value) -> Option<ForgeMessage> {
         comment_id,
         number,
         is_pull_request,
+        linked_issue: None,
         event: "issue_comment".into(),
         title: None,
     })

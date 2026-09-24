@@ -170,6 +170,7 @@ impl Inner {
             repository: job.message.repository.clone(),
             issue_number: job.message.number,
             is_pull_request: job.message.is_pull_request,
+            linked_issue_number: job.message.linked_issue,
             title: job.message.title.clone(),
             credentials,
         };
@@ -295,6 +296,7 @@ mod tests {
             comment_id: Some(1),
             number: Some(1),
             is_pull_request: false,
+            linked_issue: None,
             event: "issue_comment".into(),
             title: None,
         }

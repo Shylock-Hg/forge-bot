@@ -244,6 +244,7 @@ mod tests {
             comment_id,
             number: Some(3),
             is_pull_request: false,
+            linked_issue: None,
             event: "issues".into(),
             title: None,
         };

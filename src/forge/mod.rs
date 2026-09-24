@@ -34,6 +34,12 @@ pub struct ForgeMessage {
     pub number: Option<u64>,
     /// True when the comment belongs to a pull request.
     pub is_pull_request: bool,
+    /// Issue the pull request closes / fixes / resolves, when the description
+    /// references one. This is internal routing metadata: it keeps a pull
+    /// request and its issue on the same conversation, and is never sent to
+    /// the agent.
+    #[serde(default)]
+    pub linked_issue: Option<u64>,
     /// The forge event name, e.g. `issue_comment`.
     pub event: String,
     /// Title of the issue / pull request, used to enrich the agent prompt.
@@ -41,6 +47,24 @@ pub struct ForgeMessage {
 }
 
 impl ForgeMessage {
+    /// Stable key identifying the conversation (thread) this message belongs
+    /// to. Pull requests are folded onto their linked issue when one is known,
+    /// so a pull request and the issue it closes share an agent/session. The
+    /// key never leaves the gateway.
+    pub fn conversation_key(&self) -> String {
+        let number = if self.is_pull_request {
+            self.linked_issue.or(self.number)
+        } else {
+            self.number
+        };
+        format!(
+            "{}:{}:{}",
+            self.forge,
+            self.repository,
+            number.unwrap_or_default()
+        )
+    }
+
     /// Repository identifier without the owner.
     pub fn repo_name(&self) -> &str {
         self.repository
@@ -179,6 +203,15 @@ pub(crate) fn parse_comment_payload(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
+    let linked_issue = if is_pull_request {
+        issue
+            .and_then(|i| i.get("body"))
+            .and_then(Value::as_str)
+            .and_then(linked_issue_number)
+    } else {
+        None
+    };
+
     let location = build_location(
         base_url,
         repository,
@@ -198,6 +231,7 @@ pub(crate) fn parse_comment_payload(
         comment_id,
         number,
         is_pull_request,
+        linked_issue,
         event: event.to_owned(),
         title,
     }])
@@ -258,6 +292,12 @@ pub(crate) fn parse_description_payload(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
+    let linked_issue = if is_pull_request {
+        linked_issue_number(body_text)
+    } else {
+        None
+    };
+
     let location = description_location(
         base_url,
         repository,
@@ -276,9 +316,56 @@ pub(crate) fn parse_description_payload(
         comment_id: None,
         number,
         is_pull_request,
+        linked_issue,
         event: event.to_owned(),
         title,
     }])
+}
+
+/// Find the first issue referenced with a closing keyword
+/// (`close(s|d)`, `fix(es|ed)`, `resolve(s|d)`) in a description.
+///
+/// Forgejo, GitHub and GitLab all recognize those keywords to link a pull
+/// request to the issue it addresses; the gateway only needs the number so it
+/// can keep both threads on one agent.
+pub(crate) fn linked_issue_number(body: &str) -> Option<u64> {
+    // Longest forms first so `closes` is not shadowed by `close`.
+    const KEYWORDS: [&str; 9] = [
+        "closes", "closed", "close", "fixes", "fixed", "fix", "resolves", "resolved", "resolve",
+    ];
+
+    let lower = body.to_ascii_lowercase();
+    // Track the earliest reference in the text so `Fixes #3, closes #4`
+    // resolves to 3 regardless of the order keywords are checked.
+    let mut best: Option<(usize, u64)> = None;
+    for keyword in KEYWORDS {
+        let mut from = 0;
+        while let Some(offset) = lower[from..].find(keyword) {
+            let start = from + offset;
+            let end = start + keyword.len();
+            from = end;
+
+            // Require a token boundary before the keyword.
+            if start > 0 && lower.as_bytes()[start - 1].is_ascii_alphanumeric() {
+                continue;
+            }
+
+            let mut rest = lower[end..].trim_start();
+            rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+            let Some(rest) = rest.strip_prefix('#') else {
+                continue;
+            };
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(number) = digits.parse::<u64>() {
+                if best.is_none_or(|(seen, _)| start < seen) {
+                    best = Some((start, number));
+                }
+                // The first valid reference for this keyword wins.
+                break;
+            }
+        }
+    }
+    best.map(|(_, number)| number)
 }
 
 fn description_location(
@@ -365,6 +452,18 @@ mod tests {
             hmac_sha256_hex(&key, data),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
+    }
+
+    #[test]
+    fn extracts_linked_issue_from_closing_keywords() {
+        assert_eq!(linked_issue_number("Fixes #42"), Some(42));
+        assert_eq!(linked_issue_number("closes: #7"), Some(7));
+        assert_eq!(linked_issue_number("Resolved #100 and more"), Some(100));
+        assert_eq!(linked_issue_number("This does not close anything"), None);
+        // `closely` must not be mistaken for `close`.
+        assert_eq!(linked_issue_number("closely #3"), None);
+        // The first keyword wins.
+        assert_eq!(linked_issue_number("Fixes #3, closes #4"), Some(3));
     }
 
     #[test]

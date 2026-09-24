@@ -98,6 +98,7 @@ Implemented:
 - [x] GitHub and GitLab adapters
 - [x] Per-user systemd service (no root)
 - [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
+- [x] Conversation affinity: one issue/PR thread stays on one agent instance, with stale bindings evicted
 
 Still open (see the issue's roadmap):
 

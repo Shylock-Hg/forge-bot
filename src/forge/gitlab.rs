@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::config::GitlabConfig;
 use crate::error::{BotError, Result};
-use crate::forge::{ForgeAdapter, ForgeMessage, constant_time_eq};
+use crate::forge::{ForgeAdapter, ForgeMessage, constant_time_eq, linked_issue_number};
 use crate::location::ForgeKind;
 
 /// GitLab webhook adapter.
@@ -161,6 +161,18 @@ impl ForgeAdapter for GitlabAdapter {
         }
         .map(str::to_owned);
 
+        // A merge request links to the issue it closes through its
+        // description; keep both on the same conversation when it does.
+        let linked_issue = if is_pull_request {
+            payload
+                .get("merge_request")
+                .and_then(|m| m.get("description"))
+                .and_then(Value::as_str)
+                .and_then(linked_issue_number)
+        } else {
+            None
+        };
+
         let location = attrs
             .get("url")
             .and_then(Value::as_str)
@@ -185,6 +197,7 @@ impl ForgeAdapter for GitlabAdapter {
             comment_id,
             number,
             is_pull_request,
+            linked_issue,
             event,
             title,
         }])

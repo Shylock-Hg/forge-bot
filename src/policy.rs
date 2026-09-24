@@ -107,6 +107,7 @@ mod tests {
             comment_id: None,
             number: Some(1),
             is_pull_request: false,
+            linked_issue: None,
             event: "issue_comment".into(),
             title: None,
         }
