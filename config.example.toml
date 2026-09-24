@@ -66,20 +66,23 @@ recover = true
 #
 # Each adapter has sensible defaults; any field can be overridden. A custom
 # adapter only needs a `command`.
+#
+# `timeout_secs = 0` disables the wall-clock limit, so an agent is allowed to
+# run to completion instead of being killed when a timer expires.
 
 [agents.codex]
-timeout_secs = 1800
+timeout_secs = 0
 # dangerously_skip_permissions = false
 
 [agents.pi]
 command = "pi"
 args = ["--print", "--mode", "text"]
-timeout_secs = 1800
+timeout_secs = 0
 
 [agents.claude]
 command = "claude"
 args = ["--print"]
-timeout_secs = 1800
+timeout_secs = 0
 
 # [agents.kimi]
 # command = "kimi"
@@ -90,7 +93,7 @@ timeout_secs = 1800
 # command = "my-agent"
 # args = ["--non-interactive"]
 # prompt = "stdin" # or "arg"
-# timeout_secs = 3600
+# timeout_secs = 0
 # [agents.my-agent.env]
 # MY_AGENT_FLAG = "1"
 

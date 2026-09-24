@@ -435,7 +435,8 @@ pub struct AgentConfig {
     pub args: Option<Vec<String>>,
     /// How the prompt is delivered: `stdin` (default) or `arg`.
     pub prompt: Option<PromptDelivery>,
-    /// Maximum runtime in seconds.
+    /// Wall-clock limit in seconds; `0` disables it so the agent runs to
+    /// completion instead of being killed when a timer expires.
     pub timeout_secs: Option<u64>,
     /// Extra environment variables for the process.
     pub env: BTreeMap<String, String>,

@@ -27,7 +27,7 @@ pub struct CommandAgent {
     program: String,
     args: Vec<String>,
     prompt: PromptDelivery,
-    timeout: Duration,
+    timeout: Option<Duration>,
     env: BTreeMap<String, String>,
     dangerously_skip_permissions: bool,
 }
@@ -39,7 +39,7 @@ impl CommandAgent {
             program: program.into(),
             args: Vec::new(),
             prompt: PromptDelivery::Stdin,
-            timeout: Duration::from_secs(3600),
+            timeout: None,
             env: BTreeMap::new(),
             dangerously_skip_permissions: false,
         }
@@ -70,8 +70,10 @@ impl CommandAgent {
         self
     }
 
+    /// Set a wall-clock limit for the command. Without this the agent runs
+    /// until its process exits.
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = Some(timeout);
         self
     }
 
@@ -112,7 +114,8 @@ impl CommandAgent {
             self.prompt = prompt;
         }
         if let Some(timeout) = config.timeout_secs {
-            self.timeout = Duration::from_secs(timeout.max(1));
+            // 0 disables the wall-clock limit entirely.
+            self.timeout = (timeout != 0).then(|| Duration::from_secs(timeout));
         }
         if let Some(dangerous) = config.dangerously_skip_permissions {
             self.dangerously_skip_permissions = dangerous;
@@ -252,13 +255,22 @@ impl Agent for CommandAgent {
             })
         };
 
-        match tokio::time::timeout(self.timeout, run).await {
-            Err(_) => Ok(AgentOutcome::failure(
-                format!("agent timed out after {:?}", self.timeout),
-                started.elapsed(),
-            )),
-            Ok(Err(err)) => Err(err),
-            Ok(Ok(output)) => {
+        let result = match self.timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, run).await {
+                Err(_) => {
+                    return Ok(AgentOutcome::failure(
+                        format!("agent timed out after {timeout:?}"),
+                        started.elapsed(),
+                    ));
+                }
+                Ok(result) => result,
+            },
+            None => run.await,
+        };
+
+        match result {
+            Err(err) => Err(err),
+            Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let summary = summarize(&stdout, &stderr);
@@ -385,5 +397,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BotError::Agent { .. }));
+    }
+
+    #[tokio::test]
+    async fn config_timeout_zero_disables_the_limit() {
+        let config = crate::config::AgentConfig {
+            timeout_secs: Some(0),
+            ..Default::default()
+        };
+        let agent = CommandAgent::new("sleeper", "sh")
+            .arg("-c")
+            .arg("sleep 1; printf done")
+            .apply_config(&config);
+        let request = AgentRequest {
+            location: url::Url::parse("https://forge.example.com/o/r/issues/1").unwrap(),
+            message: "x".into(),
+        };
+        let outcome = agent.run(&request, &AgentContext::default()).await.unwrap();
+        assert!(outcome.success);
+        assert!(outcome.summary.contains("done"));
     }
 }
