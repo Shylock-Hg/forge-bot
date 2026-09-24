@@ -48,7 +48,8 @@ result = true
 # retry the job on the next available agent. When no agent is left the bot
 # replies "No available agent". `[quota]` is accepted as an alias.
 fallback = true
-cooldown_secs = 3600
+# Five hours, matching the typical agent quota/reset window.
+cooldown_secs = 18000
 # Extra, case-insensitive phrases that count as a capacity message, in
 # addition to the built-in markers ("usage limit", "rate limit", "too many
 # requests", "quota exceeded", "overloaded", "at capacity", "503 Service

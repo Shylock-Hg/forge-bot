@@ -156,7 +156,7 @@ most important options:
 | `[workspace]` | Whether to clone a checkout, and where. |
 | `[reply]` | Whether the gateway posts ack/result comments. |
 | `[session]` | Queue/state directory, worker count, recovery. |
-| `[capacity]` | Capacity/quota detection: `fallback`, `cooldown_secs`, extra `markers` (`[quota]` is an alias). |
+| `[capacity]` | Capacity/quota detection: `fallback`, `cooldown_secs` (default 5 h), extra `markers` (`[quota]` is an alias). |
 | `[agents.<name>]` | Per-agent `command`, `args`, `prompt`, `timeout_secs`, `env`. |
 
 Configuration is loaded from `FORGE_BOT_CONFIG` (or `--config`), falling back to

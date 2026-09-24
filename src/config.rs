@@ -456,6 +456,13 @@ pub enum PromptDelivery {
     Arg,
 }
 
+/// Default cooldown before a capacity-limited agent is retried: five hours.
+///
+/// Agent quota windows (Codex weekly limits, Anthropic 5-hour sessions, ...)
+/// typically reset on a multi-hour cadence, so retrying sooner mostly just
+/// burns another failed run.
+pub const DEFAULT_CAPACITY_COOLDOWN_SECS: u64 = 5 * 60 * 60;
+
 /// How the dispatcher reacts when an agent hits a capacity limit.
 ///
 /// A failed run whose output looks like a quota, rate-limit or
@@ -471,6 +478,7 @@ pub struct CapacityConfig {
     /// skipped for `cooldown_secs`.
     pub fallback: bool,
     /// How long (seconds) an agent is skipped after it reports a limit.
+    /// Defaults to [`DEFAULT_CAPACITY_COOLDOWN_SECS`] (five hours).
     pub cooldown_secs: u64,
     /// Extra, case-insensitive substrings that count as a capacity message, in
     /// addition to the built-in markers.
@@ -481,7 +489,7 @@ impl Default for CapacityConfig {
     fn default() -> Self {
         Self {
             fallback: true,
-            cooldown_secs: 3600,
+            cooldown_secs: DEFAULT_CAPACITY_COOLDOWN_SECS,
             markers: Vec::new(),
         }
     }
@@ -490,7 +498,7 @@ impl Default for CapacityConfig {
 impl CapacityConfig {
     fn ensure_defaults(&mut self) {
         if self.cooldown_secs == 0 {
-            self.cooldown_secs = 3600;
+            self.cooldown_secs = DEFAULT_CAPACITY_COOLDOWN_SECS;
         }
     }
 }
@@ -654,6 +662,24 @@ timeout_secs = 60
         assert!(!config.capacity.fallback);
         assert_eq!(config.capacity.cooldown_secs, 120);
         assert_eq!(config.capacity.markers, vec!["no tokens left".to_owned()]);
+    }
+
+    #[test]
+    fn capacity_cooldown_defaults_to_five_hours() {
+        assert_eq!(CapacityConfig::default().cooldown_secs, 5 * 60 * 60);
+        assert_eq!(
+            DEFAULT_CAPACITY_COOLDOWN_SECS,
+            5 * 60 * 60,
+            "the documented default is five hours"
+        );
+
+        // An explicit zero is treated as "unset" and normalized to the default.
+        let mut config = CapacityConfig {
+            cooldown_secs: 0,
+            ..Default::default()
+        };
+        config.ensure_defaults();
+        assert_eq!(config.cooldown_secs, DEFAULT_CAPACITY_COOLDOWN_SECS);
     }
 
     #[test]
