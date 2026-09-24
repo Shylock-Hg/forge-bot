@@ -2,8 +2,6 @@
 //!
 //! `claude --print <prompt>` runs non-interactively.
 
-use std::time::Duration;
-
 use crate::agent::command::CommandAgent;
 use crate::config::{AgentConfig, PromptDelivery};
 
@@ -12,7 +10,6 @@ pub fn default_agent() -> CommandAgent {
     CommandAgent::new("claude", "claude")
         .args(["--print"])
         .prompt(PromptDelivery::Arg)
-        .timeout(Duration::from_secs(3600))
 }
 
 /// Build a Claude Code adapter, applying user overrides.

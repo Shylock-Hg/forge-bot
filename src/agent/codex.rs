@@ -6,8 +6,6 @@
 //! lets the agent edit the checkout, or a full bypass when the operator opts in
 //! with `dangerously_skip_permissions = true`.
 
-use std::time::Duration;
-
 use crate::agent::command::CommandAgent;
 use crate::config::{AgentConfig, PromptDelivery};
 
@@ -16,7 +14,6 @@ pub fn default_agent() -> CommandAgent {
     CommandAgent::new("codex", "codex")
         .args(["exec", "--skip-git-repo-check", "--color", "never"])
         .prompt(PromptDelivery::Stdin)
-        .timeout(Duration::from_secs(3600))
 }
 
 /// Build a Codex adapter, applying user overrides.
