@@ -8,12 +8,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::agent::command::CommandAgent;
+use crate::agent::pi_rpc::PiPoolAgent;
 use crate::agent::{Agent, claude, codex, kimi, pi};
 use crate::config::Config;
 use crate::error::{BotError, Result};
 
 /// Names of the adapters that are always registered.
-pub const BUILTIN_AGENTS: &[&str] = &["codex", "pi", "claude", "kimi"];
+pub const BUILTIN_AGENTS: &[&str] = &["codex", "pi", "pi-rpc", "claude", "kimi"];
 
 /// Resolves agent names to adapters.
 pub struct AgentRegistry {
@@ -39,6 +40,9 @@ impl AgentRegistry {
 
         let kimi_cfg = overrides.get("kimi").cloned().unwrap_or_default();
         agents.insert("kimi".into(), Arc::new(kimi::build(&kimi_cfg)));
+
+        // Pooled Pi RPC adapter, configured from its own `[pi_rpc]` section.
+        agents.insert("pi-rpc".into(), Arc::new(PiPoolAgent::new(&config.pi_rpc)));
 
         // Custom adapters: any override that is not a built-in must provide a
         // command to run.

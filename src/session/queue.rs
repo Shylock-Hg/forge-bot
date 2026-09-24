@@ -141,12 +141,8 @@ impl Inner {
         let workspace = match self.workspaces.prepare(&job.message, &credentials).await {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.finish(
-                    &key,
-                    &job,
-                    &AgentOutcome::failure(error.to_string(), Default::default()),
-                )
-                .await;
+                self.finish(&key, &job, &permission_aware_failure(&job, &error))
+                    .await;
                 return;
             }
         };
@@ -189,7 +185,7 @@ impl Inner {
         let outcome = agent.run(&request, &context).await;
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(error) => AgentOutcome::failure(error.to_string(), Default::default()),
+            Err(error) => permission_aware_failure(&job, &error),
         };
 
         self.finish(&key, &job, &outcome).await;
@@ -226,9 +222,40 @@ impl Inner {
     }
 
     async fn reply(&self, location: &url::Url, body: &str) {
-        if let Err(error) = self.api.post_comment(location, body).await {
-            tracing::warn!(%error, %location, "failed to post comment");
+        match self.api.post_comment(location, body).await {
+            Ok(()) => {}
+            Err(error) if error.is_permission_denied() => {
+                tracing::warn!(
+                    %location,
+                    %error,
+                    "cannot reply: the forge denied comment permission"
+                );
+            }
+            Err(error) => tracing::warn!(%error, %location, "failed to post comment"),
         }
+    }
+}
+
+/// Build a failure outcome, replacing forge permission errors with a clear
+/// user-facing message.
+fn permission_aware_failure(job: &Job, error: &BotError) -> AgentOutcome {
+    if error.is_permission_denied() {
+        tracing::warn!(
+            job = %job.id,
+            repo = %job.message.repository,
+            %error,
+            "forge denied permission"
+        );
+        AgentOutcome::failure(
+            format!(
+                "🔒 Permission Deny of {}: the bot is not allowed to access `{}`. \
+                 Please ask a repository owner to grant the bot access, then mention it again.",
+                job.message.forge, job.message.repository
+            ),
+            Default::default(),
+        )
+    } else {
+        AgentOutcome::failure(error.to_string(), Default::default())
     }
 }
 
@@ -321,6 +348,27 @@ mod tests {
         assert!(sessions.pending_jobs().unwrap().is_empty());
         let session = sessions.get(&SessionStore::key(&message("o/r"))).unwrap();
         assert_eq!(session.runs[0].success, Some(true));
+    }
+
+    #[test]
+    fn permission_failure_is_user_facing() {
+        let job = Job {
+            id: Uuid::new_v4(),
+            message: message("o/r"),
+            mention: Mention {
+                agent: None,
+                message: "x".into(),
+            },
+            agent: "pi-rpc".into(),
+            created_at: Utc::now(),
+        };
+        let outcome = permission_aware_failure(
+            &job,
+            &BotError::ForgePermissionDenied("forge returned 403".into()),
+        );
+        assert!(!outcome.success);
+        assert!(outcome.summary.contains("Permission Deny"));
+        assert!(outcome.summary.contains("o/r"));
     }
 
     #[tokio::test]

@@ -177,11 +177,18 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(BotError::Other(anyhow::anyhow!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )))
+        let message = format!("git {} failed: {}", args.join(" "), stderr.trim());
+        let lower = stderr.to_lowercase();
+        if stderr.contains("403")
+            || stderr.contains("401")
+            || lower.contains("authentication failed")
+            || lower.contains("could not read username")
+            || lower.contains("permission denied")
+        {
+            Err(BotError::ForgePermissionDenied(message))
+        } else {
+            Err(BotError::Other(anyhow::anyhow!(message)))
+        }
     }
 }
 

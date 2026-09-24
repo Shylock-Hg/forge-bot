@@ -1,0 +1,27 @@
+[Unit]
+Description=forge-bot — forge @mention bridge
+Documentation=https://forgejo.shylockhg.me/shylock/forge-bot
+After=network-online.target forgejo.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/etc/forge-bot
+EnvironmentFile=-/etc/forge-bot/forge-bot.env
+ExecStart=/usr/local/bin/forge-bot --config /etc/forge-bot/forge-bot.toml serve
+Restart=on-failure
+RestartSec=5s
+
+# State and workspaces must be writable by the service account.
+StateDirectory=forge-bot
+ReadWritePaths=/var/lib/forge-bot
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

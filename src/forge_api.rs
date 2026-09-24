@@ -139,10 +139,14 @@ async fn send(request: reqwest::RequestBuilder) -> Result<()> {
         return Ok(());
     }
     let text = response.text().await.unwrap_or_default();
-    Err(BotError::ForgeApi(format!(
-        "forge returned {status}: {}",
-        text.trim()
-    )))
+    let detail = format!("forge returned {status}: {}", text.trim());
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(BotError::ForgePermissionDenied(detail));
+    }
+    Err(BotError::ForgeApi(detail))
 }
 
 /// A [`ForgeApi`] that drops comments, useful for tests and dry runs.

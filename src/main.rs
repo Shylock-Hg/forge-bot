@@ -26,6 +26,8 @@ struct Cli {
 enum Command {
     /// Run the webhook server (default).
     Serve,
+    /// Run only the polling ingester.
+    Poll,
     /// Validate the configuration and print a summary.
     Check,
 }
@@ -39,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => forge_bot::serve(config).await?,
+        Command::Poll => forge_bot::poll(config).await?,
         Command::Check => print_summary(&config),
     }
 

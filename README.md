@@ -92,9 +92,11 @@ Implemented:
 - [x] Location URL + message extraction
 - [x] Codex adapter
 - [x] Pi / Kimi / Claude Code adapters
+- [x] Long-lived Pi RPC agent pool (`pi-rpc`): reuses an idle agent, spawns one when all are busy
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Bounded job queue + on-disk session/job persistence
 - [x] GitHub and GitLab adapters
+- [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
 
 Still open (see the issue's roadmap):
 
@@ -114,7 +116,14 @@ cargo run -- check
 
 # Run the server (default command).
 cargo run -- serve
+
+# Or run only the polling ingester, without binding a port.
+cargo run -- poll
 ```
+
+For a full deployment walkthrough — registering the Forgejo webhook, running
+as a service, secrets, verification and troubleshooting — see
+[`deploy.md`](deploy.md).
 
 Secrets can be supplied through the environment instead of the file:
 
@@ -147,12 +156,13 @@ values.
 
 ## Wiring a Forgejo webhook
 
-1. In the repository/org settings open **Webhooks → Add webhook → Forgejo**.
-2. Target URL: `http://<host>:8080/webhooks/forgejo`.
-3. Secret: the same value as `FORGEJO_WEBHOOK_SECRET`.
-4. Events: **Issue comments** (and **Pull request comments** if available).
-5. Give the bot user a token with `write:issue` / `write:repository` scope and
-   set it as `FORGEJO_TOKEN`.
+See [`doc/forgejo-webhook.md`](doc/forgejo-webhook.md) for the full guide
+(repository / organization / user / system scopes, events, API examples, the
+loopback caveat, and verification).
+
+Quick repository hook: **Settings → Webhooks → Add webhook → Forgejo**, target
+`http://<host>:8080/webhooks/forgejo`, secret = `FORGEJO_WEBHOOK_SECRET`, event
+**Issue comments**.
 
 The endpoint also accepts GitHub (`/webhooks/github`) and GitLab
 (`/webhooks/gitlab`) webhooks, selected by URL path.
