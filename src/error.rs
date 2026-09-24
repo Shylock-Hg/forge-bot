@@ -35,6 +35,10 @@ pub enum BotError {
     #[error("forge api error: {0}")]
     ForgeApi(String),
 
+    /// The forge refused the operation (HTTP 401/403, git auth failure).
+    #[error("permission denied by forge: {0}")]
+    ForgePermissionDenied(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -46,4 +50,12 @@ pub enum BotError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl BotError {
+    /// Whether the error is a forge permission denial (as opposed to a
+    /// malformed request or a server error).
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self, BotError::ForgePermissionDenied(_))
+    }
 }

@@ -9,6 +9,7 @@ pub mod codex;
 pub mod command;
 pub mod kimi;
 pub mod pi;
+pub mod pi_rpc;
 pub mod registry;
 
 use std::path::PathBuf;

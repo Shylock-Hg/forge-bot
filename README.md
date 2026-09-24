@@ -92,9 +92,11 @@ Implemented:
 - [x] Location URL + message extraction
 - [x] Codex adapter
 - [x] Pi / Kimi / Claude Code adapters
+- [x] Long-lived Pi RPC agent pool (`pi-rpc`): reuses an idle agent, spawns one when all are busy
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Bounded job queue + on-disk session/job persistence
 - [x] GitHub and GitLab adapters
+- [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
 
 Still open (see the issue's roadmap):
 
@@ -114,7 +116,14 @@ cargo run -- check
 
 # Run the server (default command).
 cargo run -- serve
+
+# Or run only the polling ingester, without binding a port.
+cargo run -- poll
 ```
+
+For a full deployment walkthrough — registering the Forgejo webhook, running
+as a service, secrets, verification and troubleshooting — see
+[`deploy.md`](deploy.md).
 
 Secrets can be supplied through the environment instead of the file:
 

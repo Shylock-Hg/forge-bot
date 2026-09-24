@@ -30,6 +30,10 @@ pub struct Config {
     pub reply: ReplyConfig,
     pub session: SessionConfig,
     pub agents: AgentConfigs,
+    /// Long-lived Pi RPC agent pool (`pi-rpc` adapter).
+    pub pi_rpc: PiRpcConfig,
+    /// Forge polling ingester, used when webhooks cannot be configured.
+    pub poller: PollerConfig,
 }
 
 impl Default for Config {
@@ -44,6 +48,8 @@ impl Default for Config {
             reply: ReplyConfig::default(),
             session: SessionConfig::default(),
             agents: AgentConfigs::default(),
+            pi_rpc: PiRpcConfig::default(),
+            poller: PollerConfig::default(),
         }
     }
 }
@@ -87,6 +93,24 @@ impl Config {
         self.policy.ensure_defaults();
         self.workspace.ensure_defaults();
         self.session.ensure_defaults();
+        if self.pi_rpc.command.is_empty() {
+            self.pi_rpc.command = "pi".to_owned();
+        }
+        if self.pi_rpc.max_agents == 0 {
+            self.pi_rpc.max_agents = 1;
+        }
+        if self.pi_rpc.timeout_secs == 0 {
+            self.pi_rpc.timeout_secs = 1800;
+        }
+        if self.poller.interval_secs == 0 {
+            self.poller.interval_secs = 15;
+        }
+        if self.poller.discover_interval_secs == 0 {
+            self.poller.discover_interval_secs = 300;
+        }
+        if self.poller.page_limit == 0 {
+            self.poller.page_limit = 50;
+        }
     }
 
     fn apply_env(&mut self) {
@@ -424,6 +448,93 @@ pub enum PromptDelivery {
     #[default]
     Stdin,
     Arg,
+}
+
+/// Configuration for the long-lived Pi RPC agent pool.
+///
+/// Unlike the one-shot `pi` adapter, `pi-rpc` keeps `pi --mode rpc`
+/// subprocesses alive and reuses them for subsequent requests. When every
+/// agent in the pool is busy (or the pool is empty) a new one is spawned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PiRpcConfig {
+    /// The `pi` executable to run.
+    pub command: String,
+    /// Extra arguments appended after `--mode rpc` (and the flags below).
+    pub args: Vec<String>,
+    /// Maximum number of live `pi` processes.
+    pub max_agents: usize,
+    /// Kill an unused agent after this many seconds.
+    pub idle_ttl_secs: u64,
+    /// Maximum runtime of a single request.
+    pub timeout_secs: u64,
+    /// Pass `--approve` so project-local files are trusted.
+    pub approve: bool,
+    /// Disable pi's session persistence (`--no-session`).
+    pub no_session: bool,
+    /// Optional model override, e.g. `deepseek-flash`.
+    pub model: Option<String>,
+    /// Optional provider override, e.g. `deepseek`.
+    pub provider: Option<String>,
+    /// Extra environment variables for the spawned agents.
+    pub env: BTreeMap<String, String>,
+}
+
+impl Default for PiRpcConfig {
+    fn default() -> Self {
+        Self {
+            command: "pi".to_owned(),
+            args: Vec::new(),
+            max_agents: 2,
+            idle_ttl_secs: 900,
+            timeout_secs: 1800,
+            approve: true,
+            no_session: true,
+            model: None,
+            provider: None,
+            env: BTreeMap::new(),
+        }
+    }
+}
+
+/// Configuration for the polling ingester.
+///
+/// Forge webhooks are the preferred trigger, but a bot account that is only a
+/// repository collaborator cannot create them. Polling reuses the same
+/// pipeline with nothing more than a read token.
+///
+/// When `repositories` is empty the poller discovers every repository visible
+/// to the token (via `/repos/search`) and refreshes that list every
+/// `discover_interval_secs`, so newly created repositories are picked up
+/// automatically. Set `repositories` to an explicit `owner/repo` list to
+/// restrict polling instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PollerConfig {
+    pub enabled: bool,
+    /// Seconds between polls.
+    pub interval_secs: u64,
+    /// Explicit repositories to watch; empty means "all visible repositories".
+    pub repositories: Vec<String>,
+    /// How often to refresh the discovered repository list.
+    pub discover_interval_secs: u64,
+    /// How far back to look for a repository the first time it is seen.
+    pub lookback_secs: u64,
+    /// Page size for the comments and repository search endpoints.
+    pub page_limit: usize,
+}
+
+impl Default for PollerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 15,
+            repositories: Vec::new(),
+            discover_interval_secs: 300,
+            lookback_secs: 3600,
+            page_limit: 50,
+        }
+    }
 }
 
 /// Expand a leading `~` in a path into `$HOME`.

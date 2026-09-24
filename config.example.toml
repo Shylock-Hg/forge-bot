@@ -79,3 +79,33 @@ timeout_secs = 1800
 # timeout_secs = 3600
 # [agents.my-agent.env]
 # MY_AGENT_FLAG = "1"
+
+# --- long-lived Pi RPC agent pool -------------------------------------------
+#
+# The `pi-rpc` adapter keeps `pi --mode rpc` processes alive and reuses an idle
+# agent for the same workspace, spawning a new one when all are busy.
+[pi_rpc]
+command = "pi"
+max_agents = 2
+idle_ttl_secs = 900
+timeout_secs = 1800
+approve = true
+no_session = true
+# model = "deepseek-flash"
+# provider = "deepseek"
+# args = []
+
+# --- polling ingester -------------------------------------------------------
+#
+# Use when the bot account cannot create a repository webhook. Consumes the
+# same pipeline but discovers mentions through the issue-comments API.
+[poller]
+enabled = false
+interval_secs = 15
+# Empty = every repository visible to the token. The list is refreshed every
+# discover_interval_secs, so newly created repositories are picked up
+# automatically. Set an explicit ["owner/repo", ...] list to restrict polling.
+repositories = []
+discover_interval_secs = 300
+lookback_secs = 3600
+page_limit = 50

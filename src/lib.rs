@@ -20,6 +20,7 @@ pub mod forge_api;
 pub mod location;
 pub mod mention;
 pub mod policy;
+pub mod poller;
 pub mod session;
 pub mod webhook;
 pub mod workspace;
@@ -116,7 +117,17 @@ pub fn build_app(config: Config) -> Result<AppState> {
 /// Run the webhook server until the process is stopped.
 pub async fn serve(config: Config) -> Result<()> {
     let bind = config.bind.clone();
+    let poller_enabled = config.poller.enabled;
     let app = build_app(config)?;
+
+    if poller_enabled {
+        let poller = Arc::new(poller::Poller::new(
+            app.config.clone(),
+            app.dispatcher.clone(),
+        )?);
+        tokio::spawn(poller.run());
+    }
+
     let router = webhook::router(app);
 
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -125,5 +136,16 @@ pub async fn serve(config: Config) -> Result<()> {
 
     tracing::info!(%bind, "forge-bot listening");
     axum::serve(listener, router).await?;
+    Ok(())
+}
+
+/// Run only the polling ingester (no webhook listener).
+pub async fn poll(config: Config) -> Result<()> {
+    let app = build_app(config)?;
+    let poller = Arc::new(poller::Poller::new(
+        app.config.clone(),
+        app.dispatcher.clone(),
+    )?);
+    poller.run().await;
     Ok(())
 }
