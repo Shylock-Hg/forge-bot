@@ -3,6 +3,10 @@
 //! Holds every configured [`Agent`] and resolves the adapter to use for a
 //! request. The four built-ins (Codex, Pi, Claude Code, Kimi) are always
 //! available and can be overridden or extended from configuration.
+//!
+//! Codex is the first choice: it leads [`BUILTIN_AGENTS`], the fallback order
+//! returned by [`AgentRegistry::available_names`], and the default used when no
+//! configured default resolves to a registered adapter.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -76,6 +80,10 @@ impl AgentRegistry {
             config.default_agent.clone()
         } else if !config.agents.default.is_empty() && agents.contains_key(&config.agents.default) {
             config.agents.default.clone()
+        } else if agents.contains_key("codex") {
+            // Codex is the first choice even when the configured default is
+            // unknown: prefer it over the alphabetically first adapter.
+            "codex".to_owned()
         } else {
             agents
                 .keys()
@@ -112,9 +120,22 @@ impl AgentRegistry {
         }
     }
 
-    /// All registered agent names.
+    /// All registered agent names in preference order: built-ins in
+    /// [`BUILTIN_AGENTS`] order (so `codex` leads), then custom adapters
+    /// alphabetically.
     pub fn names(&self) -> Vec<String> {
-        self.agents.keys().cloned().collect()
+        let mut names: Vec<String> = BUILTIN_AGENTS
+            .iter()
+            .filter(|name| self.agents.contains_key(**name))
+            .map(|name| (*name).to_owned())
+            .collect();
+        names.extend(
+            self.agents
+                .keys()
+                .filter(|name| !BUILTIN_AGENTS.contains(&name.as_str()))
+                .cloned(),
+        );
+        names
     }
 
     /// Mark an agent unavailable until `cooldown` has elapsed.
@@ -156,12 +177,12 @@ impl AgentRegistry {
         }
     }
 
-    /// Names of the agents that are registered and not capacity-limited.
+    /// Names of the agents that are registered and not capacity-limited, in
+    /// preference order (see [`Self::names`]); codex is first when available.
     pub fn available_names(&self) -> Vec<String> {
-        self.agents
-            .keys()
+        self.names()
+            .into_iter()
             .filter(|name| self.is_available(name))
-            .cloned()
             .collect()
     }
 }
@@ -218,6 +239,27 @@ mod tests {
             registry.get("does-not-exist"),
             Err(BotError::UnknownAgent(_))
         ));
+    }
+
+    #[test]
+    fn codex_is_the_default_and_first_listed_choice() {
+        let registry = AgentRegistry::from_config(&Config::default());
+        assert_eq!(registry.default_name(), "codex");
+        assert_eq!(registry.names().first().map(String::as_str), Some("codex"));
+        assert_eq!(
+            registry.available_names().first().map(String::as_str),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn unknown_default_falls_back_to_codex() {
+        let config = Config {
+            default_agent: "does-not-exist".into(),
+            ..Default::default()
+        };
+        let registry = AgentRegistry::from_config(&config);
+        assert_eq!(registry.default_name(), "codex");
     }
 
     #[test]

@@ -150,7 +150,7 @@ most important options:
 | --- | --- |
 | `bind` | Address the webhook server listens on. |
 | `mention` | Trigger string, default `@agent`. |
-| `default_agent` | Agent used when the mention does not pick one. |
+| `default_agent` | Agent used when the mention does not pick one; defaults to `codex`. |
 | `[forgejo]` | `base_url`, `webhook_secret`, `token`, `bot_username`. |
 | `[policy]` | `allow_all`, `allowed_users`, `allowed_repos`. |
 | `[workspace]` | Whether to clone a checkout, and where. |

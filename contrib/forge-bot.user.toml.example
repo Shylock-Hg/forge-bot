@@ -5,7 +5,8 @@
 
 bind = "127.0.0.1:8080"
 mention = "@agent"
-default_agent = "pi-rpc"
+# Codex is the first choice; switch to "pi-rpc" for the long-lived pool.
+default_agent = "codex"
 
 [forgejo]
 base_url = "http://127.0.0.1:3000"

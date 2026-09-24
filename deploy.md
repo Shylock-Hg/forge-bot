@@ -45,7 +45,8 @@ $EDITOR forge-bot.toml
 
 The important fields:
 
-* `mention`, `default_agent = "pi-rpc"`;
+* `mention`, `default_agent = "codex"` (codex is the first choice; the
+  `pi-rpc` pool can be selected explicitly with `@agent:pi-rpc`);
 * `[forgejo]` `base_url`, `bot_username`;
 * `[policy]` `allowed_users` / `allowed_repos`; an empty `allowed_repos` lets
   the configured users trigger the bot on any repository, while leaving both
