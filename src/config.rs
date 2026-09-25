@@ -432,6 +432,11 @@ impl AgentConfigs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
+    /// Whether the adapter is registered at all. Defaults to `true` for every
+    /// adapter except the one-shot `pi`, which is off by default because
+    /// `pi-rpc` is the default Pi backend. Set `[agents.pi] enabled = true` to
+    /// bring the one-shot adapter back.
+    pub enabled: Option<bool>,
     pub command: Option<String>,
     /// Extra arguments passed before the prompt.
     pub args: Option<Vec<String>>,
@@ -544,7 +549,9 @@ impl Default for PiRpcConfig {
             idle_ttl_secs: 900,
             timeout_secs: 0,
             approve: true,
-            no_session: true,
+            // Persist the backend session so an evicted/restarted process can
+            // resume the same conversation instead of cold-starting.
+            no_session: false,
             model: None,
             provider: None,
             env: BTreeMap::new(),
@@ -672,6 +679,12 @@ timeout_secs = 60
         assert!(!config.capacity.fallback);
         assert_eq!(config.capacity.cooldown_secs, 120);
         assert_eq!(config.capacity.markers, vec!["no tokens left".to_owned()]);
+    }
+
+    #[test]
+    fn parses_agent_enabled_flag() {
+        let config: Config = toml::from_str("[agents.pi]\nenabled = true\n").unwrap();
+        assert_eq!(config.agents.get("pi").unwrap().enabled, Some(true));
     }
 
     #[test]

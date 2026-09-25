@@ -95,7 +95,10 @@ Implemented:
 - [x] Auto-approve: codex always bypasses its sandbox; claude skips permission
   checks and pi trusts project files by default (`dangerously_skip_permissions = false`
   opts those two out)
-- [x] Long-lived Pi RPC agent pool (`pi-rpc`): reuses an idle agent, spawns one when all are busy
+- [x] Long-lived Pi RPC agent pool (`pi-rpc`), the default Pi backend: reuses an
+  idle agent, spawns one when all are busy, and persists a deterministic
+  `--session-id` so an evicted process resumes its conversation. The one-shot
+  `pi` adapter is kept but disabled by default (`[agents.pi] enabled = true`)
 - [x] Per-thread agent sessions: one conversation per `owner/repo` issue or PR,
   resumed by `pi-rpc` and the one-shot `codex`/`pi`/`claude` adapters, so the
   model context (and its prompt cache) is reused across comments

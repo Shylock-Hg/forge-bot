@@ -47,9 +47,15 @@ max_agents = 2
 idle_ttl_secs = 900
 timeout_secs = 1800
 approve = true
-no_session = true
+# Persist the backend session so an evicted process resumes the conversation.
+no_session = false
 # model = "deepseek-flash"
 # provider = "deepseek"
+
+# The one-shot `pi` adapter is disabled by default now that `pi-rpc` is the
+# default Pi backend. Uncomment to bring it back.
+# [agents.pi]
+# enabled = true
 
 [poller]
 enabled = false

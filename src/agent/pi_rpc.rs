@@ -18,6 +18,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+use crate::agent::session::SessionStore;
 use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PiRpcConfig;
 use crate::error::{BotError, Result};
@@ -32,6 +33,34 @@ const SCRUBBED_ENV: &[&str] = &[
     "VISUAL",
 ];
 
+/// Arguments for a `pi --mode rpc` process.
+///
+/// `session_id` is only used when sessions are persisted (`no_session =
+/// false`), so an evicted process resumes its conversation from disk. With
+/// `no_session = true` the process is explicitly ephemeral.
+fn rpc_arguments(config: &PiRpcConfig, session_id: Option<&str>) -> Vec<String> {
+    let mut args = vec!["--mode".to_owned(), "rpc".to_owned()];
+    if config.approve {
+        args.push("--approve".to_owned());
+    }
+    if config.no_session {
+        args.push("--no-session".to_owned());
+    } else if let Some(session_id) = session_id {
+        args.push("--session-id".to_owned());
+        args.push(session_id.to_owned());
+    }
+    if let Some(model) = &config.model {
+        args.push("--model".to_owned());
+        args.push(model.clone());
+    }
+    if let Some(provider) = &config.provider {
+        args.push("--provider".to_owned());
+        args.push(provider.clone());
+    }
+    args.extend(config.args.iter().cloned());
+    args
+}
+
 /// A single `pi --mode rpc` subprocess.
 pub struct PiRpcClient {
     child: Child,
@@ -43,26 +72,18 @@ pub struct PiRpcClient {
 
 impl PiRpcClient {
     /// Spawn a new RPC agent in `workspace`.
+    ///
+    /// When `session_id` is set (and sessions are persisted) the process is
+    /// started with `--session-id <id>`, so an evicted or restarted agent can
+    /// resume the same on-disk conversation instead of cold-starting.
     pub fn spawn(
         config: &PiRpcConfig,
         workspace: &Path,
         credentials: &[(String, String)],
+        session_id: Option<&str>,
     ) -> Result<Self> {
         let mut cmd = Command::new(&config.command);
-        cmd.arg("--mode").arg("rpc");
-        if config.approve {
-            cmd.arg("--approve");
-        }
-        if config.no_session {
-            cmd.arg("--no-session");
-        }
-        if let Some(model) = &config.model {
-            cmd.arg("--model").arg(model);
-        }
-        if let Some(provider) = &config.provider {
-            cmd.arg("--provider").arg(provider);
-        }
-        cmd.args(&config.args);
+        cmd.args(rpc_arguments(config, session_id));
         cmd.envs(config.env.clone());
         cmd.envs(credentials.iter().cloned());
         for key in SCRUBBED_ENV {
@@ -269,6 +290,8 @@ struct PoolEntry {
 /// Shared pool internals.
 struct PoolInner {
     config: PiRpcConfig,
+    /// Conversation -> backend session id, so evicted processes resume.
+    sessions: Arc<SessionStore>,
     state: Mutex<PoolState>,
     notify: Notify,
 }
@@ -388,7 +411,14 @@ impl PoolInner {
 
                 if state.agents.len() < self.config.max_agents {
                     let id = Uuid::new_v4();
-                    let client = PiRpcClient::spawn(&self.config, workspace, credentials)?;
+                    let session_id = (!self.config.no_session)
+                        .then(|| self.sessions.deterministic_id("pi-rpc", key));
+                    let client = PiRpcClient::spawn(
+                        &self.config,
+                        workspace,
+                        credentials,
+                        session_id.as_deref(),
+                    )?;
                     let pid = client.pid();
                     state.agents.push(PoolEntry {
                         id,
@@ -495,10 +525,11 @@ pub struct PiPoolAgent {
 }
 
 impl PiPoolAgent {
-    pub fn new(config: &PiRpcConfig) -> Self {
+    pub fn new(config: &PiRpcConfig, sessions: Arc<SessionStore>) -> Self {
         Self {
             inner: Arc::new(PoolInner {
                 config: config.clone(),
+                sessions,
                 state: Mutex::new(PoolState::default()),
                 notify: Notify::new(),
             }),
@@ -598,6 +629,57 @@ mod tests {
         }
     }
 
+    fn store() -> Arc<SessionStore> {
+        Arc::new(SessionStore::default())
+    }
+
+    #[test]
+    fn rpc_arguments_persist_a_session_id_by_default() {
+        let config = PiRpcConfig {
+            approve: true,
+            no_session: false,
+            model: Some("deepseek-flash".into()),
+            provider: Some("deepseek".into()),
+            ..Default::default()
+        };
+        let args = rpc_arguments(&config, Some("session-123"));
+        assert_eq!(&args[..2], ["--mode", "rpc"]);
+        assert!(args.contains(&"--approve".to_owned()));
+        assert!(args.contains(&"--session-id".to_owned()));
+        assert!(args.contains(&"session-123".to_owned()));
+        assert!(!args.contains(&"--no-session".to_owned()));
+    }
+
+    #[test]
+    fn rpc_arguments_are_ephemeral_when_sessions_are_disabled() {
+        let config = PiRpcConfig {
+            no_session: true,
+            ..Default::default()
+        };
+        let args = rpc_arguments(&config, Some("session-123"));
+        assert!(args.contains(&"--no-session".to_owned()));
+        assert!(!args.iter().any(|arg| arg == "--session-id"));
+    }
+
+    #[test]
+    fn session_ids_are_deterministic_per_conversation() {
+        let agent = PiPoolAgent::new(&cfg(), store());
+        let first = agent
+            .inner
+            .sessions
+            .deterministic_id("pi-rpc", "forgejo:o/r:1");
+        let again = agent
+            .inner
+            .sessions
+            .deterministic_id("pi-rpc", "forgejo:o/r:1");
+        let other = agent
+            .inner
+            .sessions
+            .deterministic_id("pi-rpc", "forgejo:o/r:2");
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+    }
+
     #[test]
     fn prompt_includes_request() {
         let request = AgentRequest {
@@ -617,7 +699,7 @@ mod tests {
 
     #[test]
     fn reaps_dead_idle_agents_but_keeps_busy_ones() {
-        let agent = PiPoolAgent::new(&cfg());
+        let agent = PiPoolAgent::new(&cfg(), store());
         let mut state = agent.inner.state.lock().unwrap();
         state.agents.push(PoolEntry {
             id: Uuid::new_v4(),
@@ -644,7 +726,7 @@ mod tests {
 
     #[test]
     fn reaps_stale_conversation_mappings() {
-        let agent = PiPoolAgent::new(&cfg());
+        let agent = PiPoolAgent::new(&cfg(), store());
         let mut state = agent.inner.state.lock().unwrap();
         let kept = Uuid::new_v4();
         state.agents.push(PoolEntry {
@@ -717,7 +799,7 @@ for line in sys.stdin:
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
-        let agent = Arc::new(PiPoolAgent::new(&config));
+        let agent = Arc::new(PiPoolAgent::new(&config, store()));
 
         let request = AgentRequest {
             location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),
@@ -799,7 +881,7 @@ for line in sys.stdin:
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
-        let agent = Arc::new(PiPoolAgent::new(&config));
+        let agent = Arc::new(PiPoolAgent::new(&config, store()));
         let workspace = dir.path();
         let first = agent.inner.acquire("first", workspace, &[]).await.unwrap();
 
@@ -841,7 +923,7 @@ for line in sys.stdin:
             max_agents: 3,
             ..Default::default()
         };
-        let agent = PiPoolAgent::new(&config);
+        let agent = PiPoolAgent::new(&config, store());
         let workspace = dir.path();
         let bound = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
         let other = agent.inner.acquire("other", workspace, &[]).await.unwrap();
@@ -871,7 +953,7 @@ for line in sys.stdin:
             max_agents: 1,
             ..Default::default()
         };
-        let agent = PiPoolAgent::new(&config);
+        let agent = PiPoolAgent::new(&config, store());
         let first_workspace = dir.path();
         let second_workspace = dir.path().join("second");
         std::fs::create_dir(&second_workspace).unwrap();
@@ -911,7 +993,7 @@ for line in sys.stdin:
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
-        let agent = PiPoolAgent::new(&config);
+        let agent = PiPoolAgent::new(&config, store());
 
         let request = AgentRequest {
             location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),

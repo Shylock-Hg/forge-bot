@@ -47,34 +47,58 @@ impl AgentRegistry {
             &crate::config::expand_tilde(&config.session.dir),
         ));
 
-        let codex_cfg = overrides.get("codex").cloned().unwrap_or_default();
-        agents.insert(
-            "codex".into(),
-            Arc::new(codex::build(&codex_cfg, Arc::clone(&sessions))),
-        );
+        // `pi` is disabled by default: `pi-rpc` is the default Pi backend now.
+        // The one-shot adapter is kept and can be re-enabled with
+        // `[agents.pi] enabled = true`.
+        let enabled = |name: &str| -> bool {
+            overrides
+                .get(name)
+                .and_then(|cfg| cfg.enabled)
+                .unwrap_or(name != "pi")
+        };
 
-        let pi_cfg = overrides.get("pi").cloned().unwrap_or_default();
-        agents.insert(
-            "pi".into(),
-            Arc::new(pi::build(&pi_cfg, Arc::clone(&sessions))),
-        );
+        if enabled("codex") {
+            let codex_cfg = overrides.get("codex").cloned().unwrap_or_default();
+            agents.insert(
+                "codex".into(),
+                Arc::new(codex::build(&codex_cfg, Arc::clone(&sessions))),
+            );
+        }
 
-        let claude_cfg = overrides.get("claude").cloned().unwrap_or_default();
-        agents.insert(
-            "claude".into(),
-            Arc::new(claude::build(&claude_cfg, Arc::clone(&sessions))),
-        );
+        if enabled("pi") {
+            let pi_cfg = overrides.get("pi").cloned().unwrap_or_default();
+            agents.insert(
+                "pi".into(),
+                Arc::new(pi::build(&pi_cfg, Arc::clone(&sessions))),
+            );
+        }
 
-        let kimi_cfg = overrides.get("kimi").cloned().unwrap_or_default();
-        agents.insert("kimi".into(), Arc::new(kimi::build(&kimi_cfg)));
+        if enabled("claude") {
+            let claude_cfg = overrides.get("claude").cloned().unwrap_or_default();
+            agents.insert(
+                "claude".into(),
+                Arc::new(claude::build(&claude_cfg, Arc::clone(&sessions))),
+            );
+        }
+
+        if enabled("kimi") {
+            let kimi_cfg = overrides.get("kimi").cloned().unwrap_or_default();
+            agents.insert("kimi".into(), Arc::new(kimi::build(&kimi_cfg)));
+        }
 
         // Pooled Pi RPC adapter, configured from its own `[pi_rpc]` section.
-        agents.insert("pi-rpc".into(), Arc::new(PiPoolAgent::new(&config.pi_rpc)));
+        agents.insert(
+            "pi-rpc".into(),
+            Arc::new(PiPoolAgent::new(&config.pi_rpc, Arc::clone(&sessions))),
+        );
 
         // Custom adapters: any override that is not a built-in must provide a
         // command to run.
         for (name, cfg) in overrides {
-            if agents.contains_key(name) {
+            if BUILTIN_AGENTS.contains(&name.as_str()) || agents.contains_key(name) {
+                continue;
+            }
+            if cfg.enabled == Some(false) {
                 continue;
             }
             match &cfg.command {
@@ -218,12 +242,33 @@ mod tests {
     use crate::config::AgentConfig;
 
     #[test]
-    fn registers_builtins() {
+    fn registers_builtins_except_the_opt_in_pi() {
         let registry = AgentRegistry::from_config(&Config::default());
         for name in BUILTIN_AGENTS {
+            if *name == "pi" {
+                // The one-shot adapter is kept but off by default.
+                assert!(registry.get(name).is_err());
+                assert!(!registry.names().contains(&name.to_string()));
+                continue;
+            }
             assert!(registry.names().contains(&name.to_string()));
             assert_eq!(registry.get(name).unwrap().name(), *name);
         }
+        // `pi-rpc` is the default Pi backend now.
+        assert!(registry.names().contains(&"pi-rpc".to_owned()));
+
+        // The one-shot adapter can be enabled explicitly.
+        let mut config = Config::default();
+        config.agents.overrides.insert(
+            "pi".into(),
+            AgentConfig {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        let registry = AgentRegistry::from_config(&config);
+        assert_eq!(registry.get("pi").unwrap().name(), "pi");
+        assert!(registry.names().contains(&"pi".to_owned()));
     }
 
     #[test]
@@ -287,7 +332,7 @@ mod tests {
         assert!(!registry.is_available("codex"));
         assert!(!registry.available_names().contains(&"codex".to_owned()));
         // Other agents are unaffected.
-        assert!(registry.available_names().contains(&"pi".to_owned()));
+        assert!(registry.available_names().contains(&"pi-rpc".to_owned()));
 
         // An already-expired entry is treated as available again.
         registry.mark_unavailable("codex", Duration::ZERO);

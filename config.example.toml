@@ -107,7 +107,9 @@ timeout_secs = 0
 # --- long-lived Pi RPC agent pool -------------------------------------------
 #
 # The `pi-rpc` adapter keeps `pi --mode rpc` processes alive and reuses an idle
-# agent for the same workspace, spawning a new one when all are busy.
+# agent for the same workspace, spawning a new one when all are busy. It is the
+# default Pi backend; the one-shot `pi` adapter is kept but disabled unless
+# enabled with `[agents.pi] enabled = true`.
 [pi_rpc]
 command = "pi"
 max_agents = 2
@@ -116,7 +118,9 @@ idle_ttl_secs = 900
 # runs to completion instead of being killed when a timer expires.
 timeout_secs = 0
 approve = true
-no_session = true
+# Persist the backend session (deterministic `--session-id`) so an evicted or
+# restarted process resumes the same conversation instead of cold-starting.
+no_session = false
 # model = "deepseek-flash"
 # provider = "deepseek"
 # args = []

@@ -46,12 +46,15 @@ $EDITOR forge-bot.toml
 The important fields:
 
 * `mention`, `default_agent = "codex"` (codex is the first choice; the
-  `pi-rpc` pool can be selected explicitly with `@agent:pi-rpc`);
+  `pi-rpc` pool is the default Pi fallback and persists its sessions. The
+  one-shot `pi` adapter is disabled by default; enable it with
+  `[agents.pi] enabled = true`);
 * `[forgejo]` `base_url`, `bot_username`;
 * `[policy]` `allowed_users` / `allowed_repos`; an empty `allowed_repos` lets
   the configured users trigger the bot on any repository, while leaving both
   lists empty denies everyone;
-* `[pi_rpc]` pool size, TTL, timeout, model/provider;
+* `[pi_rpc]` pool size, TTL, timeout, model/provider, and
+  `no_session = false` to persist conversations;
 * `[poller]` `enabled = true` for the webhook-less fallback. With an empty
   `repositories` list the bot polls **every repository visible to its token**
   and refreshes that list every `discover_interval_secs`, so repositories
