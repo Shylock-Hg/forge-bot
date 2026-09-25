@@ -388,7 +388,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             dir: PathBuf::from("/tmp/forge-bot-state"),
-            workers: 2,
+            workers: 16,
             queue_capacity: 256,
             recover: true,
         }
@@ -625,7 +625,7 @@ mod tests {
         assert_eq!(config.bind, "0.0.0.0:8080");
         assert_eq!(config.mention, "@agent");
         assert_eq!(config.default_agent, "codex");
-        assert_eq!(config.session.workers, 2);
+        assert_eq!(config.session.workers, 16);
         assert!(config.workspace.enabled);
     }
 
