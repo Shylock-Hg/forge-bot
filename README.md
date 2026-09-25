@@ -162,7 +162,7 @@ most important options:
 | `[forgejo]` | `base_url`, `webhook_secret`, `token`, `bot_username`. |
 | `[policy]` | `allow_all`, `allowed_users`, `allowed_repos`. |
 | `[workspace]` | Whether to clone a checkout, and where. |
-| `[reply]` | Whether the gateway posts ack/result comments. |
+| `[reply]` | `ack` defaults to true; `result` defaults to false because agents normally reply themselves. Set `result = true` if the gateway should post completion summaries. |
 | `[session]` | Queue/state directory, worker count, recovery. |
 | `[capacity]` | Capacity/quota detection: `fallback`, `cooldown_secs` (default 5 h), extra `markers` (`[quota]` is an alias). |
 | `[agents.<name>]` | Per-agent `command`, `args`, `prompt`, `timeout_secs`, `env`. |

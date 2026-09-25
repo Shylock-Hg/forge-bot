@@ -354,8 +354,8 @@ impl WorkspaceConfig {
 pub struct ReplyConfig {
     /// Post a short acknowledgement when a job starts.
     pub ack: bool,
-    /// Post a result comment when a job finishes. Agents may reply themselves;
-    /// set to false to avoid duplicate comments.
+    /// Post a result comment when a job finishes. Disabled by default because
+    /// agents normally reply themselves; enable it when they do not.
     pub result: bool,
 }
 
@@ -363,7 +363,7 @@ impl Default for ReplyConfig {
     fn default() -> Self {
         Self {
             ack: true,
-            result: true,
+            result: false,
         }
     }
 }
@@ -627,6 +627,14 @@ mod tests {
         assert_eq!(config.default_agent, "codex");
         assert_eq!(config.session.workers, 16);
         assert!(config.workspace.enabled);
+        assert!(config.reply.ack);
+        assert!(!config.reply.result);
+    }
+
+    #[test]
+    fn result_reply_can_be_enabled_explicitly() {
+        let config: Config = toml::from_str("[reply]\nresult = true\n").unwrap();
+        assert!(config.reply.result);
     }
 
     #[test]

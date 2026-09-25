@@ -39,8 +39,8 @@ git_author_email = "forge-bot@localhost"
 [reply]
 # Post "on it" when a job starts.
 ack = true
-# Post the result when a job finishes. Disable if agents reply themselves.
-result = true
+# Post the result when a job finishes. Enable if agents do not reply themselves.
+result = false
 
 [capacity]
 # When an agent's output looks like a quota, rate-limit or capacity/overload
