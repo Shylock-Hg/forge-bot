@@ -1,10 +1,16 @@
-//! Bounded job queue and worker pool.
+//! Bounded job scheduler.
+//!
+//! One conversation (repository + issue/PR) runs at most one agent at a time,
+//! so a follow-up mention does not race the run it is meant to continue. The
+//! `[session] workers` limit bounds how many *different* conversations run in
+//! parallel; a single busy conversation never occupies more than one slot.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::capacity::is_capacity_limited;
@@ -71,7 +77,8 @@ impl Dispatcher {
             }
         }
 
-        tokio::spawn(worker_loop(inner.clone(), rx));
+        let (done_tx, done_rx) = mpsc::unbounded_channel();
+        tokio::spawn(scheduler_loop(inner.clone(), rx, done_tx, done_rx));
 
         Ok(Arc::new(Self { inner }))
     }
@@ -126,21 +133,106 @@ impl Dispatcher {
 }
 
 /// Receive jobs and run them with bounded concurrency.
-async fn worker_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<Job>) {
+///
+/// Jobs are scheduled per conversation: at most one run per session key, and
+/// up to `[session] workers` distinct conversations at a time. A conversation
+/// whose run is still going gets its follow-ups queued in order instead of
+/// consuming another worker slot, so a busy thread cannot block an unrelated
+/// issue or pull request.
+async fn scheduler_loop(
+    inner: Arc<Inner>,
+    mut rx: mpsc::Receiver<Job>,
+    done_tx: mpsc::UnboundedSender<String>,
+    mut done_rx: mpsc::UnboundedReceiver<String>,
+) {
     let concurrency = inner.config.session.workers.max(1);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
     tracing::info!(concurrency, "agent worker pool started");
 
-    while let Some(job) = rx.recv().await {
-        let permit = match semaphore.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => break,
-        };
-        let inner = inner.clone();
-        tokio::spawn(async move {
-            inner.handle(job).await;
-            drop(permit);
-        });
+    // Sessions with a run in flight.
+    let mut running: HashSet<String> = HashSet::new();
+    // Follow-up jobs waiting for their conversation to become free.
+    let mut queues: HashMap<String, VecDeque<Job>> = HashMap::new();
+    // Conversations with queued work that are not running, in arrival order.
+    let mut ready: VecDeque<String> = VecDeque::new();
+
+    loop {
+        tokio::select! {
+            incoming = rx.recv() => {
+                let Some(job) = incoming else { break };
+                let key = job.session_key();
+                if running.contains(&key) {
+                    // The conversation is busy: queue behind the current run
+                    // rather than starting a second agent for the same thread.
+                    queues.entry(key).or_default().push_back(job);
+                } else if running.len() < concurrency {
+                    running.insert(key.clone());
+                    spawn_job(&inner, job, key, &done_tx);
+                } else {
+                    if queues.entry(key.clone()).or_default().is_empty() {
+                        ready.push_back(key.clone());
+                    }
+                    queues.get_mut(&key).expect("queue exists").push_back(job);
+                }
+            }
+            Some(key) = done_rx.recv() => {
+                running.remove(&key);
+                // Jobs that arrived while this conversation ran still need
+                // to be dispatched.
+                if queues.get(&key).is_some_and(|queue| !queue.is_empty()) {
+                    ready.push_back(key);
+                }
+            }
+        }
+
+        // Start queued conversations while capacity remains. Skipping keys
+        // that are already running is a no-op defence: they never enter
+        // `ready` while running.
+        while running.len() < concurrency {
+            let Some(position) = ready.iter().position(|key| !running.contains(key)) else {
+                break;
+            };
+            let key = ready.remove(position).expect("position is valid");
+            let Some(mut queue) = queues.remove(&key) else {
+                continue;
+            };
+            let Some(job) = queue.pop_front() else {
+                continue;
+            };
+            if !queue.is_empty() {
+                queues.insert(key.clone(), queue);
+                ready.push_back(key.clone());
+            }
+            running.insert(key.clone());
+            spawn_job(&inner, job, key, &done_tx);
+        }
+    }
+}
+
+/// Run one job and report the conversation back to the scheduler when done.
+fn spawn_job(inner: &Arc<Inner>, job: Job, key: String, done_tx: &mpsc::UnboundedSender<String>) {
+    let inner = inner.clone();
+    let done = DoneGuard {
+        key: Some(key),
+        tx: done_tx.clone(),
+    };
+    tokio::spawn(async move {
+        let _done = done;
+        inner.handle(job).await;
+    });
+}
+
+/// Releases a conversation back to the scheduler even if its job panics, so a
+/// panicking run cannot permanently occupy a worker slot.
+struct DoneGuard {
+    key: Option<String>,
+    tx: mpsc::UnboundedSender<String>,
+}
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let _ = self.tx.send(key);
+        }
     }
 }
 
@@ -1057,5 +1149,205 @@ mod tests {
                 .any(|c| c.contains("at capacity") && c.contains("instead")),
             "the fallback should be announced: {comments:?}"
         );
+    }
+
+    // --- conversation scheduling ------------------------------------------
+
+    /// Message for a specific issue number, so tests can address distinct
+    /// conversations.
+    fn message_at(repo: &str, number: u64) -> ForgeMessage {
+        let mut message = message(repo);
+        message.number = Some(number);
+        message.comment_id = Some(number as i64);
+        message.location =
+            Url::parse(&format!("http://forge.local/{repo}/issues/{number}")).unwrap();
+        message
+    }
+
+    /// Blocking shell agent: it logs `start:<token>` for the token found in the
+    /// prompt, waits for `$AGENT_RELEASE/<token>`, then logs `end:<token>`. The
+    /// token lets a test hold several runs open and observe their overlap.
+    const GATE_AGENT: &str = r#"
+prompt=$(cat)
+token=$(printf '%s' "$prompt" | grep -o 'TOKEN_[A-Z]' | head -n1)
+echo "start:$token" >> "$AGENT_LOG"
+while [ ! -e "$AGENT_RELEASE/$token" ]; do sleep 0.02; done
+echo "end:$token" >> "$AGENT_LOG"
+"#;
+
+    fn gated_config(
+        dir: &std::path::Path,
+        workers: usize,
+    ) -> (Config, std::path::PathBuf, std::path::PathBuf) {
+        let mut config = test_config(dir);
+        config.session.workers = workers;
+        config.policy.allow_all = true;
+        let log = dir.join("agent.log");
+        let release = dir.join("release");
+        std::fs::create_dir_all(&release).unwrap();
+        config.agents.overrides.insert(
+            "gate".into(),
+            crate::config::AgentConfig {
+                command: Some("sh".into()),
+                args: Some(vec!["-c".into(), GATE_AGENT.trim().into()]),
+                env: [
+                    ("AGENT_LOG".to_string(), log.display().to_string()),
+                    ("AGENT_RELEASE".to_string(), release.display().to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+        (config, log, release)
+    }
+
+    async fn wait_for_log(log: &std::path::Path, needle: &str) {
+        for _ in 0..500 {
+            if std::fs::read_to_string(log)
+                .map(|contents| contents.contains(needle))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "timed out waiting for {needle:?} in {}",
+            std::fs::read_to_string(log).unwrap_or_default()
+        );
+    }
+
+    fn release_token(release: &std::path::Path, token: &str) {
+        std::fs::write(release.join(token), b"").unwrap();
+    }
+
+    fn gated_dispatcher(
+        dir: &std::path::Path,
+        workers: usize,
+    ) -> (
+        Arc<Dispatcher>,
+        Arc<SessionStore>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let (config, log, release) = gated_config(dir, workers);
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["gate"]);
+        let sessions = Arc::new(SessionStore::open(dir).unwrap());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry,
+            sessions.clone(),
+            Arc::new(NoopForgeApi),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+        (dispatcher, sessions, log, release)
+    }
+
+    async fn submit_token(dispatcher: &Dispatcher, repo: &str, number: u64, token: &str) {
+        dispatcher
+            .submit(
+                message_at(repo, number),
+                Mention {
+                    agent: Some("gate".into()),
+                    message: token.into(),
+                },
+                "gate",
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Comments on different issues must not be serialized behind each other
+    /// (issue #35).
+    #[tokio::test]
+    async fn different_conversations_run_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dispatcher, sessions, log, release) = gated_dispatcher(dir.path(), 2);
+
+        submit_token(&dispatcher, "o/r", 11, "TOKEN_A").await;
+        submit_token(&dispatcher, "o/r", 22, "TOKEN_B").await;
+
+        // Both runs must be in flight at the same time.
+        wait_for_log(&log, "start:TOKEN_A").await;
+        wait_for_log(&log, "start:TOKEN_B").await;
+        let contents = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !contents.contains("end:TOKEN_A"),
+            "A must still run: {contents}"
+        );
+        assert!(
+            !contents.contains("end:TOKEN_B"),
+            "B must still run: {contents}"
+        );
+
+        release_token(&release, "TOKEN_A");
+        release_token(&release, "TOKEN_B");
+        wait_for_drain(&sessions).await;
+    }
+
+    /// Two mentions in the same conversation must not run at the same time.
+    #[tokio::test]
+    async fn same_conversation_runs_are_serialized() {
+        let dir = tempfile::tempdir().unwrap();
+        // Spare capacity: the conversation must still serialize itself.
+        let (dispatcher, sessions, log, release) = gated_dispatcher(dir.path(), 2);
+
+        submit_token(&dispatcher, "o/r", 7, "TOKEN_A").await;
+        wait_for_log(&log, "start:TOKEN_A").await;
+        submit_token(&dispatcher, "o/r", 7, "TOKEN_B").await;
+
+        // Give the scheduler a chance to (incorrectly) start the follow-up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let contents = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !contents.contains("start:TOKEN_B"),
+            "the follow-up must wait for the current run: {contents}"
+        );
+
+        release_token(&release, "TOKEN_A");
+        wait_for_log(&log, "end:TOKEN_A").await;
+        wait_for_log(&log, "start:TOKEN_B").await;
+        release_token(&release, "TOKEN_B");
+        wait_for_drain(&sessions).await;
+
+        let contents = std::fs::read_to_string(&log).unwrap();
+        let first_start = contents.find("start:TOKEN_A").unwrap();
+        let first_end = contents.find("end:TOKEN_A").unwrap();
+        let second_start = contents.find("start:TOKEN_B").unwrap();
+        assert!(
+            first_start < first_end && first_end < second_start,
+            "runs must be ordered and not overlap: {contents}"
+        );
+    }
+
+    /// A follow-up queued behind a busy conversation must not starve a mention
+    /// on another conversation when a worker frees up.
+    #[tokio::test]
+    async fn a_queued_follow_up_does_not_starve_another_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dispatcher, sessions, log, release) = gated_dispatcher(dir.path(), 1);
+
+        submit_token(&dispatcher, "o/r", 7, "TOKEN_A").await;
+        wait_for_log(&log, "start:TOKEN_A").await;
+        // Follow-up on A's conversation, then a mention on a different issue.
+        submit_token(&dispatcher, "o/r", 7, "TOKEN_B").await;
+        submit_token(&dispatcher, "o/r", 8, "TOKEN_C").await;
+
+        release_token(&release, "TOKEN_A");
+        // The unrelated conversation runs next; the follow-up waits its turn.
+        wait_for_log(&log, "start:TOKEN_C").await;
+        let contents = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !contents.contains("start:TOKEN_B"),
+            "the follow-up must not jump ahead of the other conversation: {contents}"
+        );
+
+        release_token(&release, "TOKEN_C");
+        wait_for_log(&log, "start:TOKEN_B").await;
+        release_token(&release, "TOKEN_B");
+        wait_for_drain(&sessions).await;
     }
 }

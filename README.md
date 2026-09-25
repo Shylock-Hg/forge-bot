@@ -39,7 +39,7 @@ Forgejo / GitHub / GitLab
                ▼
 ┌──────────────────────────────┐
 │ Dispatcher                   │
-│  bounded job queue           │
+│  per-conversation scheduler  │
 │  session persistence         │
 │  workspace checkout          │
 └──────────────┬───────────────┘
@@ -100,7 +100,9 @@ Implemented:
   resumed by `pi-rpc` and the one-shot `codex`/`pi`/`claude` adapters, so the
   model context (and its prompt cache) is reused across comments
 - [x] Agent forge access (credentials via environment, optional checkout)
-- [x] Bounded job queue + on-disk session/job persistence
+- [x] Per-conversation job scheduling: at most one run per issue/PR at a time,
+  while different conversations run in parallel (bounded by `[session] workers`),
+  plus on-disk session/job persistence
 - [x] GitHub and GitLab adapters
 - [x] Per-user systemd service (no root)
 - [x] Polling ingester for deployments where the bot cannot create a webhook: discovers every repository visible to the token and refreshes the list, so new repositories are picked up automatically
@@ -214,7 +216,7 @@ The mention is matched case-insensitively and only at a word boundary, so
 src/
 ├── agent/          # Agent trait + Codex/Pi/Claude/Kimi adapters
 ├── forge/          # ForgeAdapter trait + Forgejo/GitHub/GitLab
-├── session/        # job queue, workers, session/job persistence
+├── session/        # scheduler, workers, session/job persistence
 ├── webhook.rs      # axum HTTP routes
 ├── config.rs       # configuration
 ├── location.rs     # URL → normalized ForgeLocation

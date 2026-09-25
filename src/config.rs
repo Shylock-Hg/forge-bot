@@ -374,7 +374,9 @@ impl Default for ReplyConfig {
 pub struct SessionConfig {
     /// Directory used to persist jobs and sessions.
     pub dir: PathBuf,
-    /// Maximum number of concurrently running agent jobs.
+    /// Maximum number of different conversations whose agent jobs run at the
+    /// same time. A single conversation always runs at most one job, so its
+    /// follow-up mentions never occupy more than one of these slots.
     pub workers: usize,
     /// Maximum size of the in-memory job queue.
     pub queue_capacity: usize,

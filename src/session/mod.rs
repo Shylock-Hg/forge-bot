@@ -1,7 +1,9 @@
 //! Job queue and session persistence.
 //!
 //! A webhook creates a [`Job`]. Jobs are queued, persisted to disk (so a crash
-//! or restart does not lose them), and executed by a bounded pool of workers.
+//! or restart does not lose them), and executed by a bounded scheduler. Runs
+//! are serialized per conversation and different conversations run in
+//! parallel, so a busy thread never blocks an unrelated issue or pull request.
 //! Each repository/issue pair gets a [`Session`](store::Session) that groups
 //! successive runs, which is what makes follow-up mentions in the same thread
 //! feel like a conversation.

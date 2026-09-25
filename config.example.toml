@@ -58,6 +58,9 @@ markers = []
 
 [session]
 dir = "/var/lib/forge-bot/state"
+# How many different conversations (repository + issue/PR) may run an agent at
+# the same time. A single conversation always runs at most one job, so its
+# follow-up mentions queue in order instead of taking another slot.
 workers = 2
 queue_capacity = 256
 recover = true
