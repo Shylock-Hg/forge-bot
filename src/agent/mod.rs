@@ -53,9 +53,8 @@ pub struct AgentContext {
     pub title: Option<String>,
     /// Thread the agent should answer in when it posts its own reply.
     ///
-    /// The gateway uses the same target to relay a gateway-posted summary, but
-    /// a self-replying adapter (the `command` family, with `[reply] result =
-    /// false`) needs the coordinates itself to stay in an inline review thread.
+    /// The gateway also uses this target for optional result summaries.
+    /// Agents need the coordinates to reply in an inline review thread.
     pub reply_target: ReplyTarget,
     /// Environment variables carrying forge credentials.
     pub credentials: Vec<(String, String)>,

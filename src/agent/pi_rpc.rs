@@ -25,7 +25,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::agent::prompt::{ReplyMode, build_prompt};
+use crate::agent::prompt::build_prompt;
 use crate::agent::session::SessionStore;
 use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PiRpcConfig;
@@ -593,7 +593,7 @@ impl Agent for PiPoolAgent {
             .inner
             .acquire(&key, &context.workspace, &context.credentials)
             .await?;
-        let prompt = build_prompt(request, context, ReplyMode::Gateway);
+        let prompt = build_prompt(request, context);
         let timeout = (self.inner.config.timeout_secs != 0)
             .then(|| Duration::from_secs(self.inner.config.timeout_secs));
 
@@ -684,11 +684,11 @@ mod tests {
             issue_number: Some(1),
             ..Default::default()
         };
-        let prompt = build_prompt(&request, &context, ReplyMode::Gateway);
+        let prompt = build_prompt(&request, &context);
         assert!(prompt.contains("fix the bug"));
         assert!(prompt.contains("o/r"));
         assert!(prompt.contains("request a review from the caller (@alice)"));
-        assert!(prompt.contains("Do not post to the forge"));
+        assert!(prompt.contains("Reply on the forge when you are done"));
     }
 
     #[test]

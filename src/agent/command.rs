@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::agent::prompt::{ReplyMode, build_prompt};
+use crate::agent::prompt::build_prompt;
 use crate::agent::session::SessionStore;
 use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PromptDelivery;
@@ -288,7 +288,7 @@ impl Agent for CommandAgent {
             tokio::fs::create_dir_all(&workspace).await?;
         }
 
-        let prompt = build_prompt(request, context, ReplyMode::Agent);
+        let prompt = build_prompt(request, context);
         let started = Instant::now();
         let plan = self.session_plan(context);
         let mut args = if plan.replace_base {
@@ -484,7 +484,7 @@ mod tests {
         };
 
         // A normal conversation mention keeps the existing instructions.
-        let conversation = build_prompt(&request, &context, ReplyMode::Agent);
+        let conversation = build_prompt(&request, &context);
         assert!(!conversation.contains("inline pull-request review comment"));
         assert!(conversation.contains("request a review from the caller (@alice)"));
 
@@ -494,7 +494,7 @@ mod tests {
             line: -12,
             extra_lines_count: 0,
         });
-        let review = build_prompt(&request, &context, ReplyMode::Agent);
+        let review = build_prompt(&request, &context);
         assert!(review.contains("inline pull-request review comment"));
         assert!(review.contains("review id 103"));
         assert!(review.contains("src/agent/registry.rs"));
