@@ -59,13 +59,14 @@ markers = []
 [session]
 dir = "/var/lib/forge-bot/state"
 # How many agent runs may be in flight at once, shared by every adapter:
-# one-shot (codex/pi/claude/...) and pooled (pi-rpc) alike. A worker slot is
-# held for the whole job (workspace preparation, agent run and reply), so this
-# also bounds concurrent checkouts. Because one conversation runs at most one
-# agent at a time, this is also how many different conversations may run in
-# parallel; a busy thread's follow-up mentions queue in order instead of taking
-# another slot. This bounds the host and provider load regardless of how many
-# conversations are queued.
+# one-shot (codex/pi/claude/...) and pooled (pi-rpc) alike. This is the single
+# total count of agents; there is no separate per-adapter or pool limit. A
+# worker slot is held for the whole job (workspace preparation, agent run and
+# reply), so this also bounds concurrent checkouts. Because one conversation
+# runs at most one agent at a time, this is also how many different
+# conversations may run in parallel; a busy thread's follow-up mentions queue
+# in order instead of taking another slot. This bounds the host and provider
+# load regardless of how many conversations are queued.
 workers = 16
 queue_capacity = 256
 recover = true
@@ -114,10 +115,10 @@ timeout_secs = 0
 # The `pi-rpc` adapter keeps `pi --mode rpc` processes alive and reuses an idle
 # agent for the same workspace, spawning a new one when all are busy. It is the
 # default Pi backend; the one-shot `pi` adapter is kept but disabled unless
-# enabled with `[agents.pi] enabled = true`.
+# enabled with `[agents.pi] enabled = true`. The pool has no size limit of its
+# own: `[session] workers` is the single total count and caps live agents too.
 [pi_rpc]
 command = "pi"
-max_agents = 2
 idle_ttl_secs = 900
 # Wall-clock limit for a single request. 0 disables the limit so an agent
 # runs to completion instead of being killed when a timer expires.

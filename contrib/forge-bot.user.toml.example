@@ -33,9 +33,11 @@ result = true
 
 [session]
 dir = "~/.local/state/forge-bot/state"
-# Concurrent agent runs across every adapter. A slot covers the whole job
-# (checkout, run and reply), so this also caps workspace preparation; one
-# conversation runs at most one agent, so it also caps parallel conversations.
+# Concurrent agent runs across every adapter. This is the single total count
+# of agents; there is no separate per-adapter or pool limit. A slot covers the
+# whole job (checkout, run and reply), so this also caps workspace preparation;
+# one conversation runs at most one agent, so it also caps parallel
+# conversations.
 workers = 16
 queue_capacity = 256
 recover = true
@@ -46,7 +48,6 @@ timeout_secs = 1800
 
 [pi_rpc]
 command = "pi"
-max_agents = 2
 idle_ttl_secs = 900
 timeout_secs = 1800
 approve = true

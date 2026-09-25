@@ -53,8 +53,9 @@ The important fields:
 * `[policy]` `allowed_users` / `allowed_repos`; an empty `allowed_repos` lets
   the configured users trigger the bot on any repository, while leaving both
   lists empty denies everyone;
-* `[pi_rpc]` pool size, TTL, timeout, model/provider, and
-  `no_session = false` to persist conversations. By default
+* `[pi_rpc]` TTL, timeout, model/provider, and
+  `no_session = false` to persist conversations. The pool has no size limit of
+  its own; `[session] workers` is the single total agent count. By default
   `session_per_conversation = true` keeps one session per conversation: a new
   conversation starts a fresh process instead of inheriting another
   conversation's session; set it to `false` to reuse idle processes across
@@ -160,7 +161,7 @@ mentions reuse it while it is idle.
 | Poller never triggers | `poller.enabled = false`, or the token cannot see the repository. Reset `state/poller.json` if a cursor ran ahead. |
 | `failed to spawn pi` | `pi` is not on the service account's `PATH`; set `[pi_rpc] command` to an absolute path. |
 | No reply comment | `[reply] result = false`, or the token lacks `write:issue`. |
-| Jobs pile up | Raise `[session] workers` (the cap on concurrent agent runs) and/or `[pi_rpc] max_agents` (the pool size). |
+| Jobs pile up | Raise `[session] workers`, the single cap on concurrent agent runs (pooled `pi-rpc` and one-shot alike). |
 
 ## 8. This environment
 

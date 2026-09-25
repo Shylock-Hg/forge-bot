@@ -87,9 +87,15 @@ impl AgentRegistry {
         }
 
         // Pooled Pi RPC adapter, configured from its own `[pi_rpc]` section.
+        // Its live-process count is the single global `[session] workers` cap,
+        // so the pool has no separate `max_agents` limit.
         agents.insert(
             "pi-rpc".into(),
-            Arc::new(PiPoolAgent::new(&config.pi_rpc, Arc::clone(&sessions))),
+            Arc::new(PiPoolAgent::new(
+                &config.pi_rpc,
+                Arc::clone(&sessions),
+                config.session.workers.max(1),
+            )),
         );
 
         // Custom adapters: any override that is not a built-in must provide a

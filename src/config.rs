@@ -102,9 +102,6 @@ impl Config {
         if self.pi_rpc.command.is_empty() {
             self.pi_rpc.command = "pi".to_owned();
         }
-        if self.pi_rpc.max_agents == 0 {
-            self.pi_rpc.max_agents = 1;
-        }
         if self.poller.interval_secs == 0 {
             self.poller.interval_secs = 15;
         }
@@ -518,10 +515,9 @@ impl CapacityConfig {
 /// subprocesses alive and reuses them for subsequent requests. When every
 /// agent in the pool is busy (or the pool is empty) a new one is spawned.
 ///
-/// Concurrent runs in the pool are additionally bounded by `[session]
-/// workers`, which caps how many agent runs may be in flight at once across
-/// every adapter, so setting this above that cap only allows more idle
-/// processes to be kept alive.
+/// The pool is not configured separately: `[session] workers` is the single
+/// total count of agents and bounds the pool too. No other count limit is
+/// applied here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PiRpcConfig {
@@ -529,9 +525,6 @@ pub struct PiRpcConfig {
     pub command: String,
     /// Extra arguments appended after `--mode rpc` (and the flags below).
     pub args: Vec<String>,
-    /// Maximum number of live `pi` processes. See `[session] workers` for the
-    /// cap on concurrent runs shared with the one-shot adapters.
-    pub max_agents: usize,
     /// Kill an unused agent after this many seconds.
     pub idle_ttl_secs: u64,
     /// Wall-clock limit for a single request, in seconds. `0` disables the
@@ -565,7 +558,6 @@ impl Default for PiRpcConfig {
         Self {
             command: "pi".to_owned(),
             args: Vec::new(),
-            max_agents: 2,
             idle_ttl_secs: 900,
             timeout_secs: 0,
             approve: true,
@@ -717,6 +709,17 @@ timeout_secs = 60
         let config: Config =
             toml::from_str("[pi_rpc]\nsession_per_conversation = false\n").unwrap();
         assert!(!config.pi_rpc.session_per_conversation);
+    }
+
+    #[test]
+    fn removed_pi_rpc_max_agents_is_ignored() {
+        // `[pi_rpc] max_agents` used to cap the pool separately. It is gone:
+        // `[session] workers` is the single total agent count now, but an old
+        // config that still carries the field must keep loading.
+        let config: Config =
+            toml::from_str("[session]\nworkers = 7\n\n[pi_rpc]\nmax_agents = 2\n").unwrap();
+        assert_eq!(config.session.workers, 7);
+        assert!(config.pi_rpc.session_per_conversation);
     }
 
     #[test]

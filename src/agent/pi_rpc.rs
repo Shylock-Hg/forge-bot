@@ -1,9 +1,11 @@
 //! Long-lived Pi RPC agent pool.
 //!
 //! `pi --mode rpc` is a persistent JSONL-controlled process. Instead of
-//! spawning a fresh `pi` per request, this adapter keeps a small pool of them:
-//! an incoming request reuses an idle agent, and a new agent is spawned when
-//! none is available. Idle agents are evicted after a configurable TTL.
+//! spawning a fresh `pi` per request, this adapter keeps a pool of them: an
+//! incoming request reuses an idle agent, and a new agent is spawned when none
+//! is available. The pool has no limit of its own; the single global
+//! `[session] workers` count caps how many agents may live at once. Idle
+//! agents are evicted after a configurable TTL.
 //!
 //! By default a process is bound to one conversation: a request for a
 //! different conversation in the same workspace starts a new process so it
@@ -295,6 +297,9 @@ struct PoolEntry {
 /// Shared pool internals.
 struct PoolInner {
     config: PiRpcConfig,
+    /// Cap on live `pi` processes. This is the single global
+    /// `[session] workers` count, not a separate pool limit.
+    max_agents: usize,
     /// Conversation -> backend session id, so evicted processes resume.
     sessions: Arc<SessionStore>,
     state: Mutex<PoolState>,
@@ -410,7 +415,7 @@ impl PoolInner {
                 // A live process cannot change its working directory. Make
                 // room for this workspace when the pool is full of idle
                 // processes belonging to other workspaces.
-                if state.agents.len() >= self.config.max_agents
+                if state.agents.len() >= self.max_agents
                     && let Some(index) = state.agents.iter().position(|entry| !entry.busy)
                 {
                     let mut evicted = state.agents.remove(index);
@@ -420,7 +425,7 @@ impl PoolInner {
                     state.conversations.retain(|_, id| *id != evicted.id);
                 }
 
-                if state.agents.len() < self.config.max_agents {
+                if state.agents.len() < self.max_agents {
                     let id = Uuid::new_v4();
                     let session_id = (!self.config.no_session)
                         .then(|| self.sessions.deterministic_id("pi-rpc", key));
@@ -441,7 +446,7 @@ impl PoolInner {
                         last_used: Instant::now(),
                     });
                     state.conversations.insert(key.to_owned(), id);
-                    tracing::info!(key, pid = ?pid, max = self.config.max_agents, "spawned pi agent");
+                    tracing::info!(key, pid = ?pid, max = self.max_agents, "spawned pi agent");
                     return Ok(PoolGuard {
                         inner: Arc::clone(self),
                         id,
@@ -536,10 +541,13 @@ pub struct PiPoolAgent {
 }
 
 impl PiPoolAgent {
-    pub fn new(config: &PiRpcConfig, sessions: Arc<SessionStore>) -> Self {
+    /// Build the pool. `max_agents` is the single global `[session] workers`
+    /// count; there is no separate pool limit.
+    pub fn new(config: &PiRpcConfig, sessions: Arc<SessionStore>, max_agents: usize) -> Self {
         Self {
             inner: Arc::new(PoolInner {
                 config: config.clone(),
+                max_agents: max_agents.max(1),
                 sessions,
                 state: Mutex::new(PoolState::default()),
                 notify: Notify::new(),
@@ -634,7 +642,6 @@ mod tests {
     fn cfg() -> PiRpcConfig {
         PiRpcConfig {
             command: "cat".into(),
-            max_agents: 1,
             timeout_secs: 5,
             ..Default::default()
         }
@@ -674,7 +681,7 @@ mod tests {
 
     #[test]
     fn session_ids_are_deterministic_per_conversation() {
-        let agent = PiPoolAgent::new(&cfg(), store());
+        let agent = PiPoolAgent::new(&cfg(), store(), 1);
         let first = agent
             .inner
             .sessions
@@ -710,7 +717,7 @@ mod tests {
 
     #[test]
     fn reaps_dead_idle_agents_but_keeps_busy_ones() {
-        let agent = PiPoolAgent::new(&cfg(), store());
+        let agent = PiPoolAgent::new(&cfg(), store(), 1);
         let mut state = agent.inner.state.lock().unwrap();
         state.agents.push(PoolEntry {
             id: Uuid::new_v4(),
@@ -737,7 +744,7 @@ mod tests {
 
     #[test]
     fn reaps_stale_conversation_mappings() {
-        let agent = PiPoolAgent::new(&cfg(), store());
+        let agent = PiPoolAgent::new(&cfg(), store(), 1);
         let mut state = agent.inner.state.lock().unwrap();
         let kept = Uuid::new_v4();
         state.agents.push(PoolEntry {
@@ -805,7 +812,6 @@ for line in sys.stdin:
 
         let mut config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 4,
             timeout_secs: 10,
             // Legacy workspace-level reuse: an idle process may serve a
             // different conversation and carry its session.
@@ -813,7 +819,7 @@ for line in sys.stdin:
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
-        let agent = Arc::new(PiPoolAgent::new(&config, store()));
+        let agent = Arc::new(PiPoolAgent::new(&config, store(), 4));
 
         let request = AgentRequest {
             location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),
@@ -890,12 +896,11 @@ for line in sys.stdin:
 
         let mut config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 1,
             timeout_secs: 10,
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
-        let agent = Arc::new(PiPoolAgent::new(&config, store()));
+        let agent = Arc::new(PiPoolAgent::new(&config, store(), 1));
         let workspace = dir.path();
         let first = agent.inner.acquire("first", workspace, &[]).await.unwrap();
         let first_id = first.id;
@@ -938,12 +943,11 @@ for line in sys.stdin:
 
         let config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 3,
             // Legacy workspace-level reuse, enabled explicitly here.
             session_per_conversation: false,
             ..Default::default()
         };
-        let agent = PiPoolAgent::new(&config, store());
+        let agent = PiPoolAgent::new(&config, store(), 3);
         let workspace = dir.path();
         let bound = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
         let other = agent.inner.acquire("other", workspace, &[]).await.unwrap();
@@ -970,11 +974,10 @@ for line in sys.stdin:
 
         let config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 3,
             ..Default::default()
         };
         assert!(config.session_per_conversation);
-        let agent = PiPoolAgent::new(&config, store());
+        let agent = PiPoolAgent::new(&config, store(), 3);
         let workspace = dir.path();
 
         let first = agent.inner.acquire("first", workspace, &[]).await.unwrap();
@@ -1003,10 +1006,9 @@ for line in sys.stdin:
 
         let config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 3,
             ..Default::default()
         };
-        let agent = PiPoolAgent::new(&config, store());
+        let agent = PiPoolAgent::new(&config, store(), 3);
         let workspace = dir.path();
 
         let first = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
@@ -1033,10 +1035,9 @@ for line in sys.stdin:
 
         let config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 1,
             ..Default::default()
         };
-        let agent = PiPoolAgent::new(&config, store());
+        let agent = PiPoolAgent::new(&config, store(), 1);
         let first_workspace = dir.path();
         let second_workspace = dir.path().join("second");
         std::fs::create_dir(&second_workspace).unwrap();
@@ -1071,12 +1072,11 @@ for line in sys.stdin:
 
         let mut config = PiRpcConfig {
             command: script.display().to_string(),
-            max_agents: 1,
             timeout_secs: 0,
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
-        let agent = PiPoolAgent::new(&config, store());
+        let agent = PiPoolAgent::new(&config, store(), 1);
 
         let request = AgentRequest {
             location: url::Url::parse("http://forge.local/o/r/issues/1").unwrap(),

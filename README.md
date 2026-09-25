@@ -97,8 +97,9 @@ Implemented:
   opts those two out)
 - [x] Long-lived Pi RPC agent pool (`pi-rpc`), the default Pi backend: reuses an
   idle agent, spawns one when all are busy, and persists a deterministic
-  `--session-id` so an evicted process resumes its conversation. A new
-  conversation starts a new session by default (`session_per_conversation`).
+  `--session-id` so an evicted process resumes its conversation. The pool has
+  no separate size knob: `[session] workers` is the single total agent count. A
+  new conversation starts a new session by default (`session_per_conversation`).
   The one-shot `pi` adapter is kept but disabled by default
   (`[agents.pi] enabled = true`)
 - [x] Per-thread agent sessions: one conversation per `owner/repo` issue or PR,
