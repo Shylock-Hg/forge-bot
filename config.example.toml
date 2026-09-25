@@ -58,9 +58,14 @@ markers = []
 
 [session]
 dir = "/var/lib/forge-bot/state"
-# How many different conversations (repository + issue/PR) may run an agent at
-# the same time. A single conversation always runs at most one job, so its
-# follow-up mentions queue in order instead of taking another slot.
+# How many agent runs may be in flight at once, shared by every adapter:
+# one-shot (codex/pi/claude/...) and pooled (pi-rpc) alike. A worker slot is
+# held for the whole job (workspace preparation, agent run and reply), so this
+# also bounds concurrent checkouts. Because one conversation runs at most one
+# agent at a time, this is also how many different conversations may run in
+# parallel; a busy thread's follow-up mentions queue in order instead of taking
+# another slot. This bounds the host and provider load regardless of how many
+# conversations are queued.
 workers = 16
 queue_capacity = 256
 recover = true

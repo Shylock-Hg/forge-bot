@@ -2,8 +2,10 @@
 //!
 //! One conversation (repository + issue/PR) runs at most one agent at a time,
 //! so a follow-up mention does not race the run it is meant to continue. The
-//! `[session] workers` limit bounds how many *different* conversations run in
-//! parallel; a single busy conversation never occupies more than one slot.
+//! `[session] workers` limit is the single global cap on concurrent agent
+//! runs: it bounds how many *different* conversations run in parallel, and
+//! because a conversation never runs more than one agent at a time it also
+//! bounds how many agent processes (pooled or one-shot) may be in flight.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -135,10 +137,11 @@ impl Dispatcher {
 /// Receive jobs and run them with bounded concurrency.
 ///
 /// Jobs are scheduled per conversation: at most one run per session key, and
-/// up to `[session] workers` distinct conversations at a time. A conversation
-/// whose run is still going gets its follow-ups queued in order instead of
-/// consuming another worker slot, so a busy thread cannot block an unrelated
-/// issue or pull request.
+/// up to `[session] workers` distinct conversations at a time. A slot is held
+/// for the whole job (workspace preparation, agent run and reply). Because a
+/// conversation runs at most one agent at a time, that same limit is the
+/// global cap on how many agent processes may be in flight, so a burst of
+/// mentions can never start more agents than `workers` even across adapters.
 async fn scheduler_loop(
     inner: Arc<Inner>,
     mut rx: mpsc::Receiver<Job>,
@@ -1218,6 +1221,30 @@ echo "end:$token" >> "$AGENT_LOG"
         );
     }
 
+    fn started_count(log: &std::path::Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|contents| {
+                contents
+                    .lines()
+                    .filter(|line| line.starts_with("start:"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn wait_for_started(log: &std::path::Path, expected: usize) {
+        for _ in 0..500 {
+            if started_count(log) == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "timed out waiting for {expected} agents to start; log: {}",
+            std::fs::read_to_string(log).unwrap_or_default()
+        );
+    }
+
     fn release_token(release: &std::path::Path, token: &str) {
         std::fs::write(release.join(token), b"").unwrap();
     }
@@ -1285,6 +1312,55 @@ echo "end:$token" >> "$AGENT_LOG"
 
         release_token(&release, "TOKEN_A");
         release_token(&release, "TOKEN_B");
+        wait_for_drain(&sessions).await;
+    }
+
+    /// `[session] workers` is the single cap shared by every adapter: a burst
+    /// of mentions on distinct conversations can never run more agent
+    /// processes than the configured number of workers (issue #45).
+    #[tokio::test]
+    async fn workers_bound_all_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two conversations may run at once; the third must wait for a slot.
+        let (config, log, release) = gated_config(dir.path(), 2);
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["gate"]);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry,
+            sessions.clone(),
+            Arc::new(NoopForgeApi),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        for (number, token) in [(11, "TOKEN_A"), (22, "TOKEN_B"), (33, "TOKEN_C")] {
+            submit_token(&dispatcher, "o/r", number, token).await;
+        }
+
+        // Exactly two agents may be in flight; a third would exceed the cap.
+        wait_for_started(&log, 2).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            started_count(&log),
+            2,
+            "a third agent must wait for a free slot: {}",
+            std::fs::read_to_string(&log).unwrap()
+        );
+
+        // Freeing one slot lets the next queued agent start.
+        let first = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("start:").map(str::to_owned))
+            .expect("one agent started");
+        release_token(&release, &first);
+        wait_for_started(&log, 3).await;
+
+        for token in ["TOKEN_A", "TOKEN_B", "TOKEN_C"] {
+            release_token(&release, token);
+        }
         wait_for_drain(&sessions).await;
     }
 

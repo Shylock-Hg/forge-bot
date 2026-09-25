@@ -374,9 +374,13 @@ impl Default for ReplyConfig {
 pub struct SessionConfig {
     /// Directory used to persist jobs and sessions.
     pub dir: PathBuf,
-    /// Maximum number of different conversations whose agent jobs run at the
-    /// same time. A single conversation always runs at most one job, so its
-    /// follow-up mentions never occupy more than one of these slots.
+    /// Maximum number of agent runs that may be in flight at once. A worker
+    /// slot is held for the whole job (workspace preparation, agent run and
+    /// reply), so this also bounds concurrent workspace preparation. Because a
+    /// conversation always runs at most one agent at a time, it is likewise
+    /// the number of different conversations that can run in parallel, and the
+    /// single global cap shared by every adapter, pooled (`pi-rpc`) and
+    /// one-shot (`codex`, `pi`, ...) alike.
     pub workers: usize,
     /// Maximum size of the in-memory job queue.
     pub queue_capacity: usize,
@@ -513,6 +517,11 @@ impl CapacityConfig {
 /// Unlike the one-shot `pi` adapter, `pi-rpc` keeps `pi --mode rpc`
 /// subprocesses alive and reuses them for subsequent requests. When every
 /// agent in the pool is busy (or the pool is empty) a new one is spawned.
+///
+/// Concurrent runs in the pool are additionally bounded by `[session]
+/// workers`, which caps how many agent runs may be in flight at once across
+/// every adapter, so setting this above that cap only allows more idle
+/// processes to be kept alive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PiRpcConfig {
@@ -520,7 +529,8 @@ pub struct PiRpcConfig {
     pub command: String,
     /// Extra arguments appended after `--mode rpc` (and the flags below).
     pub args: Vec<String>,
-    /// Maximum number of live `pi` processes.
+    /// Maximum number of live `pi` processes. See `[session] workers` for the
+    /// cap on concurrent runs shared with the one-shot adapters.
     pub max_agents: usize,
     /// Kill an unused agent after this many seconds.
     pub idle_ttl_secs: u64,

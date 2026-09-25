@@ -106,7 +106,9 @@ Implemented:
   model context (and its prompt cache) is reused across comments
 - [x] Agent forge access (credentials via environment, optional checkout)
 - [x] Per-conversation job scheduling: at most one run per issue/PR at a time,
-  while different conversations run in parallel (bounded by `[session] workers`),
+  while different conversations run in parallel. Since a conversation runs at
+  most one agent at a time, `[session] workers` is also the single global cap
+  on concurrent agent processes across every adapter (pooled and one-shot),
   plus on-disk session/job persistence
 - [x] GitHub and GitLab adapters
 - [x] Per-user systemd service (no root)
@@ -168,7 +170,7 @@ most important options:
 | `[policy]` | `allow_all`, `allowed_users`, `allowed_repos`. |
 | `[workspace]` | Whether to clone a checkout, and where. |
 | `[reply]` | `ack` defaults to true; `result` defaults to false because agents normally reply themselves. Set `result = true` if the gateway should post completion summaries. |
-| `[session]` | Queue/state directory, worker count, recovery. |
+| `[session]` | Queue/state directory, worker count (the global cap on concurrent agent runs), recovery. |
 | `[capacity]` | Capacity/quota detection: `fallback`, `cooldown_secs` (default 5 h), extra `markers` (`[quota]` is an alias). |
 | `[agents.<name>]` | Per-agent `command`, `args`, `prompt`, `timeout_secs`, `env`. |
 

@@ -160,7 +160,7 @@ mentions reuse it while it is idle.
 | Poller never triggers | `poller.enabled = false`, or the token cannot see the repository. Reset `state/poller.json` if a cursor ran ahead. |
 | `failed to spawn pi` | `pi` is not on the service account's `PATH`; set `[pi_rpc] command` to an absolute path. |
 | No reply comment | `[reply] result = false`, or the token lacks `write:issue`. |
-| Jobs pile up | Raise `[session] workers` / `[pi_rpc] max_agents`. |
+| Jobs pile up | Raise `[session] workers` (the cap on concurrent agent runs) and/or `[pi_rpc] max_agents` (the pool size). |
 
 ## 8. This environment
 

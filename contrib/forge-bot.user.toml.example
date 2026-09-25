@@ -33,7 +33,10 @@ result = true
 
 [session]
 dir = "~/.local/state/forge-bot/state"
-workers = 2
+# Concurrent agent runs across every adapter. A slot covers the whole job
+# (checkout, run and reply), so this also caps workspace preparation; one
+# conversation runs at most one agent, so it also caps parallel conversations.
+workers = 16
 queue_capacity = 256
 recover = true
 
