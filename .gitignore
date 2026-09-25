@@ -1,5 +1,7 @@
 /target
 **/*.rs.bk
+__pycache__/
+*.pyc
 forge-bot.toml
 /config.toml
 /state/

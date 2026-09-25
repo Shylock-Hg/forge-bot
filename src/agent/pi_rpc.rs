@@ -766,52 +766,18 @@ mod tests {
         assert!(!state.conversations.contains_key("stale"));
     }
 
-    /// Minimal `pi --mode rpc` stand-in: answers a prompt after an optional
-    /// delay and serves `get_last_assistant_text`.
-    const FAKE_PI: &str = r#"#!/usr/bin/env python3
-import json, os, sys, time
-
-delay = float(os.environ.get("FAKE_PI_DELAY", "0"))
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        message = json.loads(line)
-    except ValueError:
-        continue
-    kind = message.get("type")
-    request_id = message.get("id")
-    if kind == "prompt":
-        time.sleep(delay)
-        print(json.dumps({"type": "response", "id": request_id, "success": True}), flush=True)
-        print(json.dumps({"type": "agent_settled"}), flush=True)
-    elif kind == "get_last_assistant_text":
-        print(
-            json.dumps(
-                {
-                    "type": "response",
-                    "id": request_id,
-                    "data": {"text": "fake-result"},
-                }
-            ),
-            flush=True,
-        )
-"#;
+    // This executable is checked in, so concurrent tests never fork while
+    // another test is still writing the inode they are about to execute.
+    fn fake_pi_command() -> String {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_pi_rpc.py").into()
+    }
 
     #[tokio::test]
     async fn busy_thread_spawns_another_agent_then_reuses_idle_one() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let mut config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             timeout_secs: 10,
             // Legacy workspace-level reuse: an idle process may serve a
             // different conversation and carry its session.
@@ -886,16 +852,9 @@ for line in sys.stdin:
     #[tokio::test]
     async fn waits_only_when_pool_is_full() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let mut config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             timeout_secs: 10,
             ..Default::default()
         };
@@ -933,16 +892,9 @@ for line in sys.stdin:
     #[tokio::test]
     async fn reuses_idle_agent_before_spawning_for_busy_thread() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             // Legacy workspace-level reuse, enabled explicitly here.
             session_per_conversation: false,
             ..Default::default()
@@ -964,16 +916,9 @@ for line in sys.stdin:
     #[tokio::test]
     async fn starts_a_new_process_for_a_new_conversation_by_default() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             ..Default::default()
         };
         assert!(config.session_per_conversation);
@@ -996,16 +941,9 @@ for line in sys.stdin:
     #[tokio::test]
     async fn replays_a_conversation_on_its_own_process() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             ..Default::default()
         };
         let agent = PiPoolAgent::new(&config, store(), 3);
@@ -1025,16 +963,9 @@ for line in sys.stdin:
     #[tokio::test]
     async fn replaces_idle_agent_from_another_workspace_when_full() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             ..Default::default()
         };
         let agent = PiPoolAgent::new(&config, store(), 1);
@@ -1062,16 +993,9 @@ for line in sys.stdin:
     #[tokio::test]
     async fn disabled_timeout_lets_a_slow_agent_finish() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake_pi.py");
-        std::fs::write(&script, FAKE_PI).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let mut config = PiRpcConfig {
-            command: script.display().to_string(),
+            command: fake_pi_command(),
             timeout_secs: 0,
             ..Default::default()
         };

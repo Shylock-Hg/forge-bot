@@ -246,3 +246,11 @@ cargo test --all
 The test suite covers URL parsing, mention extraction, HMAC verification,
 payload normalization for all three forges, policy decisions, session
 persistence, the dispatcher, and an end-to-end signed webhook flow.
+
+## Research notes
+
+Measurements that informed the design live under [`doc/`](doc/):
+
+- [`doc/kvcache-hit-rate.md`](doc/kvcache-hit-rate.md) — prompt/KV cache hit
+  rate of the Codex and Pi sessions forge-bot invokes, with the reproducer
+  [`contrib/analyze-kvcache.py`](contrib/analyze-kvcache.py).
