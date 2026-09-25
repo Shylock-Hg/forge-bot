@@ -1323,6 +1323,59 @@ echo "end:$token" >> "$AGENT_LOG"
         );
     }
 
+    /// Jobs recovered from disk after a restart must respect the same
+    /// per-conversation serialization as live mentions: a crashed process that
+    /// left two unfinished jobs for one thread must not run them at once
+    /// (issue #36).
+    #[tokio::test]
+    async fn recovered_jobs_for_one_conversation_run_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, log, release) = gated_config(dir.path(), 2);
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["gate"]);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+
+        // Leave two unfinished jobs for the same conversation behind, as a
+        // restart with a job still in flight would.
+        for (index, token) in ["TOKEN_A", "TOKEN_B"].into_iter().enumerate() {
+            let mut job = Job {
+                id: Uuid::new_v4(),
+                message: message_at("o/r", 7),
+                mention: Mention {
+                    agent: Some("gate".into()),
+                    message: token.into(),
+                },
+                agent: "gate".into(),
+                created_at: Utc::now() + chrono::Duration::seconds(index as i64),
+            };
+            job.message.comment_id = Some(index as i64);
+            sessions.save_job(&job).unwrap();
+        }
+
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry,
+            sessions.clone(),
+            Arc::new(NoopForgeApi),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        wait_for_log(&log, "start:TOKEN_A").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let contents = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !contents.contains("start:TOKEN_B"),
+            "a recovered follow-up must wait for the recovered run: {contents}"
+        );
+
+        release_token(&release, "TOKEN_A");
+        wait_for_log(&log, "start:TOKEN_B").await;
+        release_token(&release, "TOKEN_B");
+        wait_for_drain(&sessions).await;
+        drop(dispatcher);
+    }
+
     /// A follow-up queued behind a busy conversation must not starve a mention
     /// on another conversation when a worker frees up.
     #[tokio::test]
