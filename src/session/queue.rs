@@ -119,9 +119,7 @@ impl Dispatcher {
                 "🤖 On it — running agent **{}**. I'll report back here when it finishes.",
                 job.agent
             );
-            if let Err(error) = self.inner.api.reply(&job.message, &ack).await {
-                tracing::warn!(%error, "failed to post acknowledgement");
-            }
+            self.inner.reply(&job.message, &ack).await;
         }
 
         tracing::info!(job = %job.id, agent = %job.agent, repo = %job.message.repository, "job queued");
@@ -440,7 +438,8 @@ impl Inner {
     }
 
     async fn reply(&self, message: &ForgeMessage, body: &str) {
-        match self.api.reply(message, body).await {
+        let reply = format!("forge-bot: {body}");
+        match self.api.reply(message, &reply).await {
             Ok(()) => {}
             Err(error) if error.is_permission_denied() => {
                 tracing::warn!(
@@ -566,8 +565,61 @@ mod tests {
 
         let comments = api.comments();
         assert_eq!(comments.len(), 1, "exactly one acknowledgement");
-        assert!(comments[0].1.contains("On it"));
+        assert!(comments[0].1.starts_with("forge-bot: 🤖 On it"));
         assert!(comments[0].1.contains("custom"));
+    }
+
+    #[tokio::test]
+    async fn result_reply_has_bot_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.reply.result = true;
+        config.policy.allow_all = true;
+        config.agents.overrides.insert(
+            "custom".into(),
+            crate::config::AgentConfig {
+                command: Some("cat".into()),
+                ..Default::default()
+            },
+        );
+        let config = Arc::new(config);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingForgeApi::new());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            Arc::new(AgentRegistry::from_config(&config)),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("custom".into()),
+                    message: "go".into(),
+                },
+                "custom",
+            )
+            .await
+            .unwrap();
+        wait_for_drain(&sessions).await;
+
+        for _ in 0..100 {
+            if !api.comments().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let comments = api.comments();
+        assert_eq!(comments.len(), 1);
+        assert!(
+            comments[0]
+                .1
+                .starts_with("forge-bot: 🤖 Agent **custom** ✅ finished")
+        );
     }
 
     /// Forge API that records the reply target of every reply, so tests can
@@ -1009,7 +1061,7 @@ mod tests {
         assert!(
             api.comments()
                 .iter()
-                .any(|body| body.contains("No available agent")),
+                .any(|body| body.starts_with("forge-bot: No available agent")),
             "the bot must reply that no agent is available"
         );
     }
@@ -1142,6 +1194,7 @@ mod tests {
         assert_eq!(session.runs[0].agent, "good-agent");
 
         let comments = api.comments();
+        assert!(comments.iter().all(|body| body.starts_with("forge-bot: ")));
         assert_eq!(
             comments.iter().filter(|c| c.contains("On it")).count(),
             1,
