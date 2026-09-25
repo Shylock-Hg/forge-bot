@@ -121,6 +121,19 @@ impl ForgeAdapter for ForgejoAdapter {
         body: &[u8],
     ) -> Result<()> {
         if self.event(headers) != "pull_request_comment" {
+            // Forgejo sends replies to inline review comments as issue_comment
+            // events, often without the review id, path, or position. Resolve
+            // the comment id through the review API before dispatching it.
+            for message in messages.iter_mut().filter(|message| {
+                message.is_pull_request
+                    && message.comment_id.is_some()
+                    && matches!(message.reply_target, ReplyTarget::Conversation)
+                    && self.bot_username.as_deref() != Some(message.author.as_str())
+            }) {
+                if let Some(target) = self.find_review_reply_target(message).await? {
+                    message.reply_target = target;
+                }
+            }
             return Ok(());
         }
 
@@ -171,6 +184,66 @@ impl ForgeAdapter for ForgejoAdapter {
 }
 
 impl ForgejoAdapter {
+    async fn find_review_reply_target(
+        &self,
+        message: &ForgeMessage,
+    ) -> Result<Option<ReplyTarget>> {
+        let (Some(token), Some(number), Some(comment_id)) =
+            (self.token.as_deref(), message.number, message.comment_id)
+        else {
+            return Ok(None);
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        let auth = format!("token {token}");
+        let base = format!(
+            "{}/api/v1/repos/{}/pulls/{number}/reviews",
+            self.base_url, message.repository
+        );
+
+        for page in 1.. {
+            let reviews: Vec<Value> = client
+                .get(&base)
+                .query(&[("limit", 100), ("page", page)])
+                .header("Authorization", &auth)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            for review in reviews.iter().rev() {
+                let Some(review_id) = review.get("id").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let comments_url = format!("{base}/{review_id}/comments");
+                for comment_page in 1.. {
+                    let comments: Vec<Value> = client
+                        .get(&comments_url)
+                        .query(&[("limit", 100), ("page", comment_page)])
+                        .header("Authorization", &auth)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await?;
+                    if let Some(comment) = comments.iter().find(|comment| {
+                        comment.get("id").and_then(Value::as_i64) == Some(comment_id)
+                    }) {
+                        return Ok(review_reply_target_with_id(comment, Some(review_id)));
+                    }
+                    if comments.len() < 100 {
+                        break;
+                    }
+                }
+            }
+            if reviews.len() < 100 {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
     /// Fetch the inline comments of the newest review on a pull request. The
     /// review is selected from the API because Forgejo's webhook payload does
     /// not identify it.
@@ -846,6 +919,66 @@ mod tests {
                 review_id: 103,
                 path: "src/main.rs".into(),
                 line: 30,
+                extra_lines_count: 0,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_issue_comment_reply_to_an_older_review_thread() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 4096];
+                let read = socket.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.contains("/reviews/121/comments") {
+                    "[]"
+                } else if request.contains("/reviews/120/comments") {
+                    r#"[{"id":9528,"path":"src/agent/command.rs","position":301,"original_position":0}]"#
+                } else {
+                    r#"[{"id":120},{"id":121}]"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let a = ForgejoAdapter::new(&ForgejoConfig {
+            base_url: format!("http://{addr}"),
+            token: Some("test-token".into()),
+            ..Default::default()
+        });
+        let payload = serde_json::json!({
+            "action": "created",
+            "issue": {"number": 54, "pull_request": {"url": "x"},
+                      "html_url": "http://forge.local/a/b/pulls/54"},
+            "comment": {"id": 9528, "body": "@agent avoid duplication",
+                        "html_url": "http://forge.local/a/b/pulls/54#issuecomment-9528",
+                        "user": {"login": "shylock"}},
+            "repository": {"full_name": "a/b"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let headers = headers("issue_comment", None);
+        let mut messages = a.parse(&headers, &body).unwrap();
+        assert_eq!(messages[0].reply_target, ReplyTarget::Conversation);
+        a.enrich(&mut messages, &headers, &body).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            messages[0].reply_target,
+            ReplyTarget::ReviewComment(ReviewCommentTarget {
+                review_id: 120,
+                path: "src/agent/command.rs".into(),
+                line: 301,
                 extra_lines_count: 0,
             })
         );

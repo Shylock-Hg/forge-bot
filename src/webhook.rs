@@ -167,6 +167,10 @@ async fn receive(
     // it in (Forgejo inline review comments).
     if let Err(error) = adapter.enrich(&mut messages, &headers, &body).await {
         tracing::warn!(forge = %forge, %error, "failed to enrich webhook");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.to_string() })),
+        );
     }
 
     let mut accepted = 0usize;
