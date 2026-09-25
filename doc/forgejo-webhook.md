@@ -199,6 +199,11 @@ on the same review, file and line, instead of appending a top-level comment to
 the pull request. This needs write access to the repository, which is the same
 permission required to comment at all.
 
+When a request made elsewhere in the PR asks the agent to answer an inline
+comment, the agent prompt explains how to find the comment by its URL fragment
+and post to the review-comment API with the same review, file and position.
+The normal issue-comment API posts to the PR conversation instead.
+
 Description events are deduplicated by a hash of the body, so an edit that
 changes the text triggers once while re-deliveries of the same text are
 ignored. Other events are accepted (`202` with `accepted: 0`) and ignored.

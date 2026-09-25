@@ -298,13 +298,34 @@ impl CommandAgent {
         prompt.push_str("Requested work:\n");
         prompt.push_str(request.message.trim());
         prompt.push('\n');
-        if let ReplyTarget::ReviewComment(target) = &context.reply_target {
-            prompt.push_str(&format!(
-                "\nThis mention is an inline pull-request review comment. Post any reply in \
-                 the same review thread (review id {}, file `{}`, line {}) instead of \
-                 opening a new top-level comment.\n",
-                target.review_id, target.path, target.line
-            ));
+        if context.is_pull_request
+            && matches!(
+                context.forge,
+                Some(crate::location::ForgeKind::Forgejo | crate::location::ForgeKind::Gitea)
+            )
+        {
+            prompt.push_str(
+                "\nWhen asked to reply to an inline code review comment, post a review comment \
+                 in its thread. A normal issue/PR comment is shown in the conversation, \
+                 not beside the code. With FORGEJO_URL and FORGEJO_TOKEN, list reviews via GET \
+                 /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews, then GET \
+                 /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/comments \
+                 until you find the parent id (the number after #issuecomment-). POST \
+                 /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/comments \
+                 with JSON fields body, path, new_position, old_position, and extra_lines_count. \
+                 Copy path and extra_lines_count from the parent. Use its position as \
+                 new_position and original_position as old_position. Forgejo uses the \
+                 same review and code position \
+                 to place the answer in the thread.\n",
+            );
+            if let ReplyTarget::ReviewComment(target) = &context.reply_target {
+                prompt.push_str(&format!(
+                    "This mention is an inline pull-request review comment. Its review id is {}, \
+                     file is `{}`, and signed line is {} (positive = new_position, negative = \
+                     old_position); extra_lines_count is {}. Reply there.\n",
+                    target.review_id, target.path, target.line, target.extra_lines_count
+                ));
+            }
         }
         prompt.push_str(
             "\nUse the tools available to you (forge CLI/API, git, shell, filesystem) to \
@@ -514,18 +535,23 @@ mod tests {
         let request = AgentRequest {
             location: url::Url::parse("https://forge.example.com/o/r/pulls/22#issuecomment-9039")
                 .unwrap(),
-            message: "why?".into(),
+            message: "Reply to the review comment at https://forge.example.com/o/r/pulls/22#issuecomment-9241".into(),
         };
         let mut context = AgentContext {
+            forge: Some(crate::location::ForgeKind::Forgejo),
             repository: "o/r".into(),
             issue_number: Some(22),
             is_pull_request: true,
             ..Default::default()
         };
 
-        // A normal conversation mention keeps the existing instructions.
+        // An agent invoked elsewhere in the PR can still find the inline
+        // comment by its URL and answer in the review thread.
         let conversation = agent.prompt_text(&request, &context);
         assert!(!conversation.contains("inline pull-request review comment"));
+        assert!(conversation.contains("#issuecomment-"));
+        assert!(conversation.contains("/reviews/{review_id}/comments"));
+        assert!(conversation.contains("new_position"));
 
         context.reply_target = ReplyTarget::ReviewComment(crate::forge::ReviewCommentTarget {
             review_id: 103,
@@ -535,10 +561,10 @@ mod tests {
         });
         let review = agent.prompt_text(&request, &context);
         assert!(review.contains("inline pull-request review comment"));
-        assert!(review.contains("review id 103"));
+        assert!(review.contains("review id is 103"));
         assert!(review.contains("src/agent/registry.rs"));
         assert!(review.contains("-12"));
-        assert!(review.contains("instead of opening a new top-level comment"));
+        assert!(review.contains("extra_lines_count is 0"));
     }
 
     #[tokio::test]
