@@ -251,9 +251,8 @@ impl PiRpcClient {
 #[derive(Default)]
 struct PoolState {
     agents: Vec<PoolEntry>,
-    /// Conversation (issue / pull request) key -> bound agent id. Recorded so
-    /// every fragment of one thread is routed to the same agent instance, and
-    /// reaped together with the agent it points at.
+    /// Conversation (issue / pull request) key -> last agent id. Prefer that
+    /// agent when idle, while allowing another one to handle a busy thread.
     conversations: HashMap<String, Uuid>,
 }
 
@@ -334,32 +333,60 @@ impl PoolInner {
             .then(|| Instant::now() + Duration::from_secs(self.config.timeout_secs));
 
         loop {
+            // Register before inspecting the pool so a release between the
+            // inspection and the wait cannot be missed.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let mut state = self.state.lock().expect("pi pool mutex poisoned");
                 self.reap(&mut state);
 
-                // Conversation affinity: a thread that is already bound to an
-                // agent keeps using that agent, even if it is momentarily
-                // busy. This is what stops two fragments of one issue being
-                // handled by different instances.
-                if let Some(id) = state.conversations.get(key).copied() {
-                    if let Some(entry) = state.agents.iter_mut().find(|entry| entry.id == id) {
-                        if !entry.busy && entry.client.is_some() {
-                            entry.busy = true;
-                            let client = entry.client.take();
-                            tracing::debug!(key, pid = ?entry.pid, "reusing bound pi agent");
-                            return Ok(PoolGuard {
-                                inner: Arc::clone(self),
-                                id,
-                                client,
-                            });
-                        }
-                        // Busy: wait for it to settle below rather than
-                        // spawning a second agent for the same thread.
-                    } else {
-                        state.conversations.remove(key);
+                let preferred = state.conversations.get(key).copied();
+                let idle = state
+                    .agents
+                    .iter()
+                    .position(|entry| {
+                        Some(entry.id) == preferred
+                            && entry.workspace == workspace
+                            && !entry.busy
+                            && entry.client.is_some()
+                    })
+                    .or_else(|| {
+                        state.agents.iter().position(|entry| {
+                            entry.workspace == workspace && !entry.busy && entry.client.is_some()
+                        })
+                    });
+                if let Some(index) = idle {
+                    let entry = &mut state.agents[index];
+                    entry.busy = true;
+                    entry.key = key.to_owned();
+                    let id = entry.id;
+                    let pid = entry.pid;
+                    let client = entry.client.take();
+                    state.conversations.insert(key.to_owned(), id);
+                    tracing::debug!(key, pid = ?pid, "reusing idle pi agent");
+                    return Ok(PoolGuard {
+                        inner: Arc::clone(self),
+                        id,
+                        client,
+                    });
+                }
+
+                // A live process cannot change its working directory. Make
+                // room for this workspace when the pool is full of idle
+                // processes belonging to other workspaces.
+                if state.agents.len() >= self.config.max_agents
+                    && let Some(index) = state.agents.iter().position(|entry| !entry.busy)
+                {
+                    let mut evicted = state.agents.remove(index);
+                    if let Some(client) = evicted.client.as_mut() {
+                        client.kill();
                     }
-                } else if state.agents.len() < self.config.max_agents {
+                    state.conversations.retain(|_, id| *id != evicted.id);
+                }
+
+                if state.agents.len() < self.config.max_agents {
                     let id = Uuid::new_v4();
                     let client = PiRpcClient::spawn(&self.config, workspace, credentials)?;
                     let pid = client.pid();
@@ -391,17 +418,14 @@ impl PoolInner {
                                 name: "pi-rpc".into(),
                                 reason: "timed out waiting for an idle pi agent".into(),
                             })?;
-                    if tokio::time::timeout(remaining, self.notify.notified())
-                        .await
-                        .is_err()
-                    {
+                    if tokio::time::timeout(remaining, notified).await.is_err() {
                         return Err(BotError::Agent {
                             name: "pi-rpc".into(),
                             reason: "timed out waiting for an idle pi agent".into(),
                         });
                     }
                 }
-                None => self.notify.notified().await,
+                None => notified.await,
             }
         }
     }
@@ -676,7 +700,7 @@ for line in sys.stdin:
 "#;
 
     #[tokio::test]
-    async fn same_thread_waits_for_its_agent_instead_of_spawning_another() {
+    async fn busy_thread_spawns_another_agent_then_reuses_idle_one() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake_pi.py");
         std::fs::write(&script, FAKE_PI).unwrap();
@@ -729,17 +753,144 @@ for line in sys.stdin:
         let bound = bound.expect("agent should be bound to the thread");
         assert_eq!(agent.live_agents(), 1);
 
-        // The second request is for the same thread. It must wait for the
-        // bound agent rather than spawn a second instance.
+        // The bound agent is busy, so the second request starts another one.
         let second = spawn(Arc::clone(&agent));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(agent.live_agents(), 1, "no duplicate agent for one thread");
-        assert_eq!(agent.conversation_binding(&key), Some(bound));
+        for _ in 0..500 {
+            if agent.live_agents() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(agent.live_agents(), 2);
+        assert_ne!(agent.conversation_binding(&key), Some(bound));
 
         assert!(first.await.unwrap().unwrap().success);
         assert!(second.await.unwrap().unwrap().success);
+        assert_eq!(agent.live_agents(), 2);
+
+        // A different thread in the same workspace uses a free process.
+        let mut other_context = context.clone();
+        other_context.issue_number = Some(2);
+        let outcome = agent.run(&request, &other_context).await.unwrap();
+        assert!(outcome.success);
+        assert_eq!(agent.live_agents(), 2);
+        assert!(
+            agent
+                .conversation_binding(&conversation_key(&other_context))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn waits_only_when_pool_is_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 1,
+            timeout_secs: 10,
+            ..Default::default()
+        };
+        config.env.insert("FAKE_PI_DELAY".into(), "1".into());
+        let agent = Arc::new(PiPoolAgent::new(&config));
+        let workspace = dir.path();
+        let first = agent.inner.acquire("first", workspace, &[]).await.unwrap();
+
+        let waiting_agent = Arc::clone(&agent);
+        let waiting_workspace = workspace.to_path_buf();
+        let waiter = tokio::spawn(async move {
+            waiting_agent
+                .inner
+                .acquire("second", &waiting_workspace, &[])
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
         assert_eq!(agent.live_agents(), 1);
-        assert_eq!(agent.conversation_binding(&key), Some(bound));
+
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.id, agent.conversation_binding("first").unwrap());
+        assert_eq!(agent.live_agents(), 1);
+    }
+
+    #[tokio::test]
+    async fn reuses_idle_agent_before_spawning_for_busy_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 3,
+            ..Default::default()
+        };
+        let agent = PiPoolAgent::new(&config);
+        let workspace = dir.path();
+        let bound = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
+        let other = agent.inner.acquire("other", workspace, &[]).await.unwrap();
+        let other_id = other.id;
+        drop(other);
+
+        let reused = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
+        assert_eq!(reused.id, other_id);
+        assert_eq!(agent.live_agents(), 2);
+        assert_eq!(agent.conversation_binding("thread"), Some(other_id));
+        drop(bound);
+    }
+
+    #[tokio::test]
+    async fn replaces_idle_agent_from_another_workspace_when_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 1,
+            ..Default::default()
+        };
+        let agent = PiPoolAgent::new(&config);
+        let first_workspace = dir.path();
+        let second_workspace = dir.path().join("second");
+        std::fs::create_dir(&second_workspace).unwrap();
+        let first = agent
+            .inner
+            .acquire("first", first_workspace, &[])
+            .await
+            .unwrap();
+        let first_id = first.id;
+        drop(first);
+
+        let second = agent
+            .inner
+            .acquire("second", &second_workspace, &[])
+            .await
+            .unwrap();
+        assert_ne!(second.id, first_id);
+        assert_eq!(agent.live_agents(), 1);
+        assert_eq!(agent.conversation_binding("first"), None);
     }
 
     #[tokio::test]

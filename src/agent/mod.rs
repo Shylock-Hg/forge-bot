@@ -44,8 +44,8 @@ pub struct AgentContext {
     pub repository: String,
     pub issue_number: Option<u64>,
     pub is_pull_request: bool,
-    /// Issue a pull request closes, when known. Used only for routing the
-    /// request to a stable agent instance; it is never exposed to the agent.
+    /// Issue a pull request closes, when known. Used to prefer the same pooled
+    /// agent for both threads; it is never exposed to the agent.
     pub linked_issue: Option<IssueRef>,
     pub title: Option<String>,
     /// Thread the agent should answer in when it posts its own reply.
@@ -90,10 +90,11 @@ impl AgentContext {
     }
 }
 
-/// Stable conversation key used to pin one thread to one agent / session.
+/// Stable conversation key used to route one thread to a backend session and
+/// prefer its most recently used pooled agent.
 ///
 /// A pull request is folded onto the issue it closes when the description
-/// references one, so both threads share an agent and a backend session. This
+/// references one, so both threads share a routing key and backend session. This
 /// is internal routing data and is deliberately never rendered into a prompt.
 pub fn conversation_key(context: &AgentContext) -> String {
     if context.repository.is_empty() {
