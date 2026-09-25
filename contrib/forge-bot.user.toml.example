@@ -49,6 +49,9 @@ timeout_secs = 1800
 approve = true
 # Persist the backend session so an evicted process resumes the conversation.
 no_session = false
+# Start a new session for a new conversation (default). Set to false to reuse
+# an idle process across conversations in the workspace.
+session_per_conversation = true
 # model = "deepseek-flash"
 # provider = "deepseek"
 

@@ -121,6 +121,12 @@ approve = true
 # Persist the backend session (deterministic `--session-id`) so an evicted or
 # restarted process resumes the same conversation instead of cold-starting.
 no_session = false
+# Start a new session for a new conversation. When true (default) a pooled
+# process only serves the conversation it is bound to; a different conversation
+# in the same workspace spawns a fresh process rather than inheriting that
+# session. Set to false to let an idle process serve any conversation in the
+# workspace and carry its earlier session.
+session_per_conversation = true
 # model = "deepseek-flash"
 # provider = "deepseek"
 # args = []

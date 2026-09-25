@@ -532,6 +532,16 @@ pub struct PiRpcConfig {
     pub approve: bool,
     /// Disable pi's session persistence (`--no-session`).
     pub no_session: bool,
+    /// Keep one backend session per conversation.
+    ///
+    /// When `true` (the default), a pooled process only serves the
+    /// conversation it is currently bound to: reusing it for a different
+    /// conversation in the same workspace would make that conversation inherit
+    /// the earlier session, so the pool starts a new process instead (which
+    /// resumes the new conversation's own deterministic session). Set to
+    /// `false` to let an idle process be reused for any conversation in the
+    /// workspace, carrying its earlier session.
+    pub session_per_conversation: bool,
     /// Optional model override, e.g. `deepseek-flash`.
     pub model: Option<String>,
     /// Optional provider override, e.g. `deepseek`.
@@ -552,6 +562,9 @@ impl Default for PiRpcConfig {
             // Persist the backend session so an evicted/restarted process can
             // resume the same conversation instead of cold-starting.
             no_session: false,
+            // Start a new session for a new conversation by default instead of
+            // handing it a process that already carries another conversation.
+            session_per_conversation: true,
             model: None,
             provider: None,
             env: BTreeMap::new(),
@@ -685,6 +698,15 @@ timeout_secs = 60
     fn parses_agent_enabled_flag() {
         let config: Config = toml::from_str("[agents.pi]\nenabled = true\n").unwrap();
         assert_eq!(config.agents.get("pi").unwrap().enabled, Some(true));
+    }
+
+    #[test]
+    fn keeps_one_session_per_conversation_by_default() {
+        assert!(PiRpcConfig::default().session_per_conversation);
+
+        let config: Config =
+            toml::from_str("[pi_rpc]\nsession_per_conversation = false\n").unwrap();
+        assert!(!config.pi_rpc.session_per_conversation);
     }
 
     #[test]

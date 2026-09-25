@@ -2,9 +2,14 @@
 //!
 //! `pi --mode rpc` is a persistent JSONL-controlled process. Instead of
 //! spawning a fresh `pi` per request, this adapter keeps a small pool of them:
-//! an incoming request reuses an idle agent for the same workspace, and a new
-//! agent is spawned when none is available. Idle agents are evicted after a
-//! configurable TTL.
+//! an incoming request reuses an idle agent, and a new agent is spawned when
+//! none is available. Idle agents are evicted after a configurable TTL.
+//!
+//! By default a process is bound to one conversation: a request for a
+//! different conversation in the same workspace starts a new process so it
+//! resumes its own session instead of inheriting the process's earlier one.
+//! `session_per_conversation = false` restores workspace-level reuse, where an
+//! idle process is handed to any conversation and carries its session.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -376,6 +381,12 @@ impl PoolInner {
                             && entry.client.is_some()
                     })
                     .or_else(|| {
+                        // A process that already holds another conversation's
+                        // session must not be handed to this one unless the
+                        // operator opted out of per-conversation sessions.
+                        if self.config.session_per_conversation {
+                            return None;
+                        }
                         state.agents.iter().position(|entry| {
                             entry.workspace == workspace && !entry.busy && entry.client.is_some()
                         })
@@ -796,6 +807,9 @@ for line in sys.stdin:
             command: script.display().to_string(),
             max_agents: 4,
             timeout_secs: 10,
+            // Legacy workspace-level reuse: an idle process may serve a
+            // different conversation and carry its session.
+            session_per_conversation: false,
             ..Default::default()
         };
         config.env.insert("FAKE_PI_DELAY".into(), "1".into());
@@ -884,6 +898,7 @@ for line in sys.stdin:
         let agent = Arc::new(PiPoolAgent::new(&config, store()));
         let workspace = dir.path();
         let first = agent.inner.acquire("first", workspace, &[]).await.unwrap();
+        let first_id = first.id;
 
         let waiting_agent = Arc::clone(&agent);
         let waiting_workspace = workspace.to_path_buf();
@@ -903,7 +918,10 @@ for line in sys.stdin:
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(second.id, agent.conversation_binding("first").unwrap());
+        // By default the freed process belongs to another conversation, so it
+        // is evicted and a fresh one is spawned for `second`.
+        assert_ne!(second.id, first_id);
+        assert_eq!(agent.conversation_binding("first"), None);
         assert_eq!(agent.live_agents(), 1);
     }
 
@@ -921,6 +939,8 @@ for line in sys.stdin:
         let config = PiRpcConfig {
             command: script.display().to_string(),
             max_agents: 3,
+            // Legacy workspace-level reuse, enabled explicitly here.
+            session_per_conversation: false,
             ..Default::default()
         };
         let agent = PiPoolAgent::new(&config, store());
@@ -935,6 +955,69 @@ for line in sys.stdin:
         assert_eq!(agent.live_agents(), 2);
         assert_eq!(agent.conversation_binding("thread"), Some(other_id));
         drop(bound);
+    }
+
+    #[tokio::test]
+    async fn starts_a_new_process_for_a_new_conversation_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 3,
+            ..Default::default()
+        };
+        assert!(config.session_per_conversation);
+        let agent = PiPoolAgent::new(&config, store());
+        let workspace = dir.path();
+
+        let first = agent.inner.acquire("first", workspace, &[]).await.unwrap();
+        let first_id = first.id;
+        drop(first);
+
+        // The process bound to `first` is idle, but a different conversation
+        // must not inherit its session: a new process is spawned instead.
+        let second = agent.inner.acquire("second", workspace, &[]).await.unwrap();
+        assert_ne!(second.id, first_id);
+        assert_eq!(agent.live_agents(), 2);
+        assert_eq!(agent.conversation_binding("first"), Some(first_id));
+        assert_eq!(agent.conversation_binding("second"), Some(second.id));
+    }
+
+    #[tokio::test]
+    async fn replays_a_conversation_on_its_own_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake_pi.py");
+        std::fs::write(&script, FAKE_PI).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PiRpcConfig {
+            command: script.display().to_string(),
+            max_agents: 3,
+            ..Default::default()
+        };
+        let agent = PiPoolAgent::new(&config, store());
+        let workspace = dir.path();
+
+        let first = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
+        let first_id = first.id;
+        drop(first);
+
+        // The same conversation always comes back to its own process, so its
+        // session stays warm.
+        let again = agent.inner.acquire("thread", workspace, &[]).await.unwrap();
+        assert_eq!(again.id, first_id);
+        assert_eq!(agent.live_agents(), 1);
     }
 
     #[tokio::test]

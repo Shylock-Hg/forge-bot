@@ -54,7 +54,11 @@ The important fields:
   the configured users trigger the bot on any repository, while leaving both
   lists empty denies everyone;
 * `[pi_rpc]` pool size, TTL, timeout, model/provider, and
-  `no_session = false` to persist conversations;
+  `no_session = false` to persist conversations. By default
+  `session_per_conversation = true` keeps one session per conversation: a new
+  conversation starts a fresh process instead of inheriting another
+  conversation's session; set it to `false` to reuse idle processes across
+  conversations in a workspace;
 * `[poller]` `enabled = true` for the webhook-less fallback. With an empty
   `repositories` list the bot polls **every repository visible to its token**
   and refreshes that list every `discover_interval_secs`, so repositories
