@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::agent::prompt::{ReplyMode, build_prompt};
 use crate::agent::session::SessionStore;
 use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PromptDelivery;
 use crate::error::{BotError, Result};
-use crate::forge::ReplyTarget;
 
 /// Maximum number of characters of captured output kept in the summary.
 const OUTPUT_LIMIT: usize = 4000;
@@ -274,47 +274,6 @@ impl CommandAgent {
     pub fn arguments(&self) -> &[String] {
         &self.args
     }
-
-    /// Build the prompt handed to the agent.
-    fn prompt_text(&self, request: &AgentRequest, context: &AgentContext) -> String {
-        let mut prompt = String::new();
-        prompt.push_str("You are an autonomous coding agent invoked from a forge comment.\n\n");
-
-        if let Some(forge) = context.forge {
-            prompt.push_str(&format!("Forge: {forge}\n"));
-        }
-        prompt.push_str(&format!("Location: {}\n", request.location));
-        if !context.repository.is_empty() {
-            prompt.push_str(&format!("Repository: {}\n", context.repository));
-        }
-        if let Some(title) = &context.title {
-            prompt.push_str(&format!("Title: {title}\n"));
-        }
-        prompt.push_str(&format!(
-            "Your working directory: {}\n",
-            context.workspace.display()
-        ));
-        prompt.push('\n');
-        prompt.push_str("Requested work:\n");
-        prompt.push_str(request.message.trim());
-        prompt.push('\n');
-        if let ReplyTarget::ReviewComment(target) = &context.reply_target {
-            prompt.push_str(&format!(
-                "\nThis mention is an inline pull-request review comment. Post any reply in \
-                 the same review thread (review id {}, file `{}`, line {}) instead of \
-                 opening a new top-level comment.\n",
-                target.review_id, target.path, target.line
-            ));
-        }
-        prompt.push_str(
-            "\nUse the tools available to you (forge CLI/API, git, shell, filesystem) to \
-             gather context, make changes, run tests, and commit/push when appropriate. \
-             Reply on the forge when you are done. Forge credentials are available in \
-             the environment.\n",
-        );
-
-        prompt
-    }
 }
 
 #[async_trait::async_trait]
@@ -329,7 +288,7 @@ impl Agent for CommandAgent {
             tokio::fs::create_dir_all(&workspace).await?;
         }
 
-        let prompt = self.prompt_text(request, context);
+        let prompt = build_prompt(request, context, ReplyMode::Agent);
         let started = Instant::now();
         let plan = self.session_plan(context);
         let mut args = if plan.replace_base {
@@ -493,6 +452,7 @@ fn summarize(stdout: &str, stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::ReplyTarget;
 
     #[test]
     fn summarize_prefers_stdout() {
@@ -510,7 +470,6 @@ mod tests {
 
     #[test]
     fn prompt_points_review_mentions_at_their_thread() {
-        let agent = CommandAgent::new("echoer", "cat");
         let request = AgentRequest {
             location: url::Url::parse("https://forge.example.com/o/r/pulls/22#issuecomment-9039")
                 .unwrap(),
@@ -518,14 +477,16 @@ mod tests {
         };
         let mut context = AgentContext {
             repository: "o/r".into(),
+            requester: "alice".into(),
             issue_number: Some(22),
             is_pull_request: true,
             ..Default::default()
         };
 
         // A normal conversation mention keeps the existing instructions.
-        let conversation = agent.prompt_text(&request, &context);
+        let conversation = build_prompt(&request, &context, ReplyMode::Agent);
         assert!(!conversation.contains("inline pull-request review comment"));
+        assert!(conversation.contains("request a review from the caller (@alice)"));
 
         context.reply_target = ReplyTarget::ReviewComment(crate::forge::ReviewCommentTarget {
             review_id: 103,
@@ -533,7 +494,7 @@ mod tests {
             line: -12,
             extra_lines_count: 0,
         });
-        let review = agent.prompt_text(&request, &context);
+        let review = build_prompt(&request, &context, ReplyMode::Agent);
         assert!(review.contains("inline pull-request review comment"));
         assert!(review.contains("review id 103"));
         assert!(review.contains("src/agent/registry.rs"));

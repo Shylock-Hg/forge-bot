@@ -282,6 +282,7 @@ impl Inner {
             workspace,
             forge: Some(job.message.forge),
             repository: job.message.repository.clone(),
+            requester: job.message.author.clone(),
             issue_number: job.message.number,
             is_pull_request: job.message.is_pull_request,
             linked_issue: job.message.linked_issue.clone(),

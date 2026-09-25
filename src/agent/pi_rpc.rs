@@ -25,6 +25,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+use crate::agent::prompt::{ReplyMode, build_prompt};
 use crate::agent::session::SessionStore;
 use crate::agent::{Agent, AgentContext, AgentOutcome, AgentRequest, conversation_key};
 use crate::config::PiRpcConfig;
@@ -592,7 +593,7 @@ impl Agent for PiPoolAgent {
             .inner
             .acquire(&key, &context.workspace, &context.credentials)
             .await?;
-        let prompt = build_prompt(request, context);
+        let prompt = build_prompt(request, context, ReplyMode::Gateway);
         let timeout = (self.inner.config.timeout_secs != 0)
             .then(|| Duration::from_secs(self.inner.config.timeout_secs));
 
@@ -604,33 +605,6 @@ impl Agent for PiPoolAgent {
             }
         }
     }
-}
-
-/// Build the prompt sent to a pooled pi agent.
-fn build_prompt(request: &AgentRequest, context: &AgentContext) -> String {
-    let mut prompt = String::new();
-    prompt.push_str("You are the coding agent responding to a forge comment.\n");
-    prompt.push_str("Work in the current directory (the repository checkout).\n\n");
-    prompt.push_str(&format!("Location: {}\n", request.location));
-    if !context.repository.is_empty() {
-        prompt.push_str(&format!("Repository: {}\n", context.repository));
-    }
-    if let Some(title) = &context.title {
-        prompt.push_str(&format!("Title: {title}\n"));
-    }
-    prompt.push_str(&format!(
-        "Working directory: {}\n\n",
-        context.workspace.display()
-    ));
-    prompt.push_str("Requested work:\n");
-    prompt.push_str(request.message.trim());
-    prompt.push('\n');
-    prompt.push_str(
-        "\nWhen finished, reply with a concise summary of what you did and any \
-         findings. Do not post to the forge yourself; the gateway relays your \
-         final message as the comment reply.\n",
-    );
-    prompt
 }
 
 #[cfg(test)]
@@ -706,12 +680,14 @@ mod tests {
         };
         let context = AgentContext {
             repository: "o/r".into(),
+            requester: "alice".into(),
             issue_number: Some(1),
             ..Default::default()
         };
-        let prompt = build_prompt(&request, &context);
+        let prompt = build_prompt(&request, &context, ReplyMode::Gateway);
         assert!(prompt.contains("fix the bug"));
         assert!(prompt.contains("o/r"));
+        assert!(prompt.contains("request a review from the caller (@alice)"));
         assert!(prompt.contains("Do not post to the forge"));
     }
 

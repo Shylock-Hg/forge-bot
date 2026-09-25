@@ -11,6 +11,7 @@ pub mod command;
 pub mod kimi;
 pub mod pi;
 pub mod pi_rpc;
+mod prompt;
 pub mod registry;
 pub mod session;
 
@@ -42,6 +43,8 @@ pub struct AgentContext {
     pub workspace: PathBuf,
     pub forge: Option<ForgeKind>,
     pub repository: String,
+    /// Login of the forge user who requested this run.
+    pub requester: String,
     pub issue_number: Option<u64>,
     pub is_pull_request: bool,
     /// Issue a pull request closes, when known. Used to prefer the same pooled
@@ -175,6 +178,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/ws"),
             forge: Some(ForgeKind::Forgejo),
             repository: "o/r".into(),
+            requester: "alice".into(),
             issue_number: Some(1),
             is_pull_request: false,
             linked_issue: None,
