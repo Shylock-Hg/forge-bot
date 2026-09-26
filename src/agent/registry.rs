@@ -1,7 +1,7 @@
 //! Agent registry.
 //!
 //! Holds every configured [`Agent`] and resolves the adapter to use for a
-//! request. The four built-ins (Codex, Pi, Claude Code, Kimi) are always
+//! request. The built-ins (Codex, Antigravity, Pi, Claude Code, Kimi) are always
 //! available and can be overridden or extended from configuration.
 //!
 //! Codex is the first choice: it leads [`BUILTIN_AGENTS`], the fallback order
@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use crate::agent::command::CommandAgent;
 use crate::agent::pi_rpc::PiPoolAgent;
-use crate::agent::{Agent, claude, codex, kimi, pi};
+use crate::agent::{Agent, agy, claude, codex, kimi, pi};
 use crate::config::Config;
 use crate::error::{BotError, Result};
 
 /// Names of the adapters that are always registered.
-pub const BUILTIN_AGENTS: &[&str] = &["codex", "pi", "pi-rpc", "claude", "kimi"];
+pub const BUILTIN_AGENTS: &[&str] = &["codex", "agy", "pi-rpc", "pi", "claude", "kimi"];
 
 /// Resolves agent names to adapters.
 ///
@@ -63,6 +63,11 @@ impl AgentRegistry {
                 "codex".into(),
                 Arc::new(codex::build(&codex_cfg, Arc::clone(&sessions))),
             );
+        }
+
+        if enabled("agy") {
+            let agy_cfg = overrides.get("agy").cloned().unwrap_or_default();
+            agents.insert("agy".into(), Arc::new(agy::build(&agy_cfg)));
         }
 
         if enabled("pi") {
@@ -316,6 +321,7 @@ mod tests {
             registry.available_names().first().map(String::as_str),
             Some("codex")
         );
+        assert_eq!(registry.available_names()[..3], ["codex", "agy", "pi-rpc"]);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! [`AgentRequest`] from the webhook and hands it to an [`Agent`]. Adapters for
 //! concrete CLIs (Codex, Pi, Claude Code, Kimi, ...) live in submodules.
 
+pub mod agy;
 pub mod capacity;
 pub mod claude;
 pub mod codex;

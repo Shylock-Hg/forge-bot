@@ -8,7 +8,7 @@ Mention the bot in a comment on an issue or pull request:
 @agent investigate this test failure and fix it
 ```
 
-and it will route the request to a coding agent (Codex, Pi, Claude Code, Kimi,
+and it will route the request to a coding agent (Codex, Antigravity CLI, Pi, Claude Code, Kimi,
 or anything you configure), which reads the surrounding context, changes code,
 runs tests, pushes, and replies.
 
@@ -91,10 +91,10 @@ Implemented:
 - [x] Authorization (allow-list users/repos, ignore self)
 - [x] Location URL + message extraction
 - [x] Codex adapter
-- [x] Pi / Kimi / Claude Code adapters
-- [x] Auto-approve: codex always bypasses its sandbox; claude skips permission
+- [x] Antigravity CLI (`agy`) / Pi / Kimi / Claude Code adapters
+- [x] Auto-approve: codex always bypasses its sandbox; agy and claude skip permission
   checks and pi trusts project files by default (`dangerously_skip_permissions = false`
-  opts those two out)
+  opts agy, claude, and pi out)
 - [x] Long-lived Pi RPC agent pool (`pi-rpc`), the default Pi backend: reuses an
   idle agent, spawns one when all are busy, and persists a deterministic
   `--session-id` so an evicted process resumes its conversation. The pool has
@@ -197,8 +197,14 @@ The endpoint also accepts GitHub (`/webhooks/github`) and GitLab
 ```text
 @agent fix the failing test          # default agent
 @agent:codex refactor this module    # pick an agent explicitly
+@agent:agy fix the build             # Antigravity CLI
 @agent:pi review the diff            # any configured adapter
 ```
+
+When a provider reaches capacity, the default fallback order is `codex` →
+`agy` → `pi-rpc` → `claude` → `kimi`. The one-shot `pi` adapter joins after
+`pi-rpc` when enabled. Authenticate `agy` interactively once before using it
+through the bot.
 
 The mention is matched case-insensitively and only at a word boundary, so
 `foo@agent.com` does not trigger it. Bot comments are ignored to avoid loops.
@@ -222,7 +228,7 @@ The mention is matched case-insensitively and only at a word boundary, so
 
 ```text
 src/
-├── agent/          # Agent trait + Codex/Pi/Claude/Kimi adapters
+├── agent/          # Agent trait + Codex/Antigravity/Pi/Claude/Kimi adapters
 ├── forge/          # ForgeAdapter trait + Forgejo/GitHub/GitLab
 ├── session/        # scheduler, workers, session/job persistence
 ├── webhook.rs      # axum HTTP routes
