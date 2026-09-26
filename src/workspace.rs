@@ -247,4 +247,148 @@ mod tests {
         assert_eq!(url.username(), "x-access-token");
         assert_eq!(url.password(), Some("ghp_x"));
     }
+
+    #[test]
+    fn authenticated_url_without_token_is_unchanged() {
+        let url = authenticated_clone_url(&msg(), &[]).unwrap();
+        assert_eq!(url.as_str(), "http://forge.local:3000/Org/My-Repo.git");
+    }
+
+    #[test]
+    fn gitlab_uses_the_token_as_username() {
+        let mut m = msg();
+        m.forge = ForgeKind::GitLab;
+        let creds = vec![("GITLAB_TOKEN".to_string(), "glt".to_string())];
+        let url = authenticated_clone_url(&m, &creds).unwrap();
+        assert_eq!(url.username(), "glt");
+        assert_eq!(url.password(), None);
+    }
+
+    #[test]
+    fn credential_selection_prefers_forge_specific_tokens() {
+        let creds = vec![
+            ("FORGE_TOKEN".to_string(), "generic".to_string()),
+            ("GITHUB_TOKEN".to_string(), "specific".to_string()),
+        ];
+        assert_eq!(
+            credential(&creds, ForgeKind::GitHub).as_deref(),
+            Some("specific")
+        );
+        assert_eq!(
+            credential(&creds, ForgeKind::GitLab).as_deref(),
+            Some("generic")
+        );
+        assert_eq!(
+            credential(&creds, ForgeKind::Unknown).as_deref(),
+            Some("generic")
+        );
+
+        let empty = vec![("GITHUB_TOKEN".to_string(), String::new())];
+        assert_eq!(credential(&empty, ForgeKind::GitHub), None);
+    }
+
+    #[test]
+    fn sanitizes_unsafe_path_characters() {
+        assert_eq!(sanitize("a/b c"), "a_b_c");
+        assert_eq!(sanitize("safe-._"), "safe-._");
+    }
+
+    #[test]
+    fn path_for_without_number_is_latest() {
+        let mut message = msg();
+        message.number = None;
+        let manager = WorkspaceManager::new(&WorkspaceConfig {
+            root: PathBuf::from("/tmp/ws"),
+            ..Default::default()
+        });
+        assert_eq!(
+            manager.path_for(&message),
+            PathBuf::from("/tmp/ws/Org__My-Repo-latest")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_git_reports_success_and_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = run_git(dir.path(), &["--version"]).await.unwrap();
+        assert!(output.to_lowercase().contains("git"));
+
+        let error = run_git(dir.path(), &["rev-parse", "--show-toplevel"])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BotError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn run_git_maps_auth_failures_to_permission_denied() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("http://{addr}/repo.git");
+        let error = run_git(dir.path(), &["clone", &url, "clone"])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BotError::ForgePermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn prepare_without_workspace_skips_cloning() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = WorkspaceManager::new(&WorkspaceConfig {
+            enabled: false,
+            root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let path = manager.prepare(&msg(), &[]).await.unwrap();
+        assert!(path.is_dir());
+        assert!(!path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_reuses_an_existing_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = WorkspaceManager::new(&WorkspaceConfig {
+            enabled: true,
+            reuse: true,
+            root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let path = manager.path_for(&msg());
+        tokio::fs::create_dir_all(path.join(".git")).await.unwrap();
+
+        let prepared = manager
+            .prepare(&msg(), &[("FORGEJO_TOKEN".into(), "tok".into())])
+            .await
+            .unwrap();
+        assert_eq!(prepared, path);
+    }
+
+    #[tokio::test]
+    async fn prepare_surfaces_clone_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = WorkspaceManager::new(&WorkspaceConfig {
+            enabled: true,
+            reuse: true,
+            root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let mut message = msg();
+        // Connection refused is immediate, unlike a DNS miss.
+        message.location = Url::parse("http://127.0.0.1:1/Org/My-Repo/issues/3").unwrap();
+
+        let error = manager.prepare(&message, &[]).await.unwrap_err();
+        assert!(matches!(error, BotError::Agent { .. }));
+    }
 }

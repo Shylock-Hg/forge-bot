@@ -280,4 +280,82 @@ mod tests {
         let loc = ForgeLocation::parse(&u("https://forge.example.com/org/repo.git")).unwrap();
         assert_eq!(loc.repo, "repo");
     }
+
+    #[test]
+    fn forge_kinds_have_stable_names_and_hosts() {
+        assert_eq!(ForgeKind::Forgejo.as_str(), "forgejo");
+        assert_eq!(ForgeKind::Gitea.as_str(), "gitea");
+        assert_eq!(ForgeKind::GitHub.as_str(), "github");
+        assert_eq!(ForgeKind::GitLab.as_str(), "gitlab");
+        assert_eq!(ForgeKind::Unknown.as_str(), "unknown");
+        assert_eq!(ForgeKind::GitHub.to_string(), "github");
+
+        assert_eq!(ForgeKind::from_host("github.com"), ForgeKind::GitHub);
+        assert_eq!(ForgeKind::from_host("gitlab.com"), ForgeKind::GitLab);
+        assert_eq!(ForgeKind::from_host("gitea.example.com"), ForgeKind::Gitea);
+        assert_eq!(ForgeKind::from_host("codeberg.org"), ForgeKind::Forgejo);
+        assert_eq!(ForgeKind::from_host("GITHUB.COM"), ForgeKind::GitHub);
+    }
+
+    #[test]
+    fn location_kinds_have_stable_names() {
+        assert_eq!(LocationKind::Issue.as_str(), "issue");
+        assert_eq!(LocationKind::PullRequest.as_str(), "pull_request");
+        assert_eq!(LocationKind::Repository.as_str(), "repository");
+        assert_eq!(LocationKind::Other("wiki".into()).as_str(), "wiki");
+    }
+
+    #[test]
+    fn parses_api_style_repository_and_other_resources() {
+        let loc = ForgeLocation::parse(&u("https://forge.example.com/a/b/repos")).unwrap();
+        assert_eq!(loc.kind, LocationKind::Repository);
+        assert_eq!(loc.number, None);
+
+        let loc = ForgeLocation::parse(&u("https://forge.example.com/a/b/wiki/5")).unwrap();
+        assert_eq!(loc.kind, LocationKind::Other("wiki".into()));
+        assert_eq!(loc.number, Some(5));
+    }
+
+    #[test]
+    fn issue_url_points_at_the_conversation() {
+        let pull = ForgeLocation::parse(&u("https://forge.example.com/a/b/pulls/3#issuecomment-9"))
+            .unwrap();
+        assert_eq!(
+            pull.issue_url().unwrap().as_str(),
+            "https://forge.example.com/a/b/pulls/3"
+        );
+
+        let issue = ForgeLocation::parse(&u("https://forge.example.com/a/b/issues/3")).unwrap();
+        assert_eq!(
+            issue.issue_url().unwrap().as_str(),
+            "https://forge.example.com/a/b/issues/3"
+        );
+
+        // A repository with no number degrades to `/issues/0`.
+        let repo = ForgeLocation::parse(&u("https://forge.example.com/a/b/repos")).unwrap();
+        assert_eq!(
+            repo.issue_url().unwrap().as_str(),
+            "https://forge.example.com/a/b/issues/0"
+        );
+
+        let broken = ForgeLocation {
+            forge: ForgeKind::Forgejo,
+            base_url: "not a url".into(),
+            owner: "a".into(),
+            repo: "b".into(),
+            kind: LocationKind::Issue,
+            number: Some(1),
+            comment_id: None,
+        };
+        assert!(broken.issue_url().is_err());
+    }
+
+    #[test]
+    fn parses_comment_fragments() {
+        assert_eq!(parse_comment_fragment(Some("issuecomment-123")), Some(123));
+        assert_eq!(parse_comment_fragment(Some("note_42")), Some(42));
+        assert_eq!(parse_comment_fragment(Some("comment-7")), Some(7));
+        assert_eq!(parse_comment_fragment(Some("no-digits")), None);
+        assert_eq!(parse_comment_fragment(None), None);
+    }
 }

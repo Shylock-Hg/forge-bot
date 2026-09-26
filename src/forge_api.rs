@@ -387,4 +387,201 @@ mod tests {
         assert!(request.contains("\"new_position\":0"));
         assert!(request.contains("\"old_position\":12"));
     }
+
+    /// Start a one-request HTTP server that answers with `status` and returns
+    /// the raw request it received.
+    async fn one_shot(status: u16) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 16384];
+            let read = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let payload = if status == 200 { "{}" } else { "denied" };
+            let response = format!(
+                "HTTP/1.1 {status} STATUS\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            request
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn config_with(
+        forgejo: Option<ForgejoConfig>,
+        github: Option<crate::config::GithubConfig>,
+        gitlab: Option<crate::config::GitlabConfig>,
+    ) -> Config {
+        let mut config = Config::default();
+        config.forges.forgejo = forgejo;
+        config.forges.github = github;
+        config.forges.gitlab = gitlab;
+        config
+    }
+
+    #[tokio::test]
+    async fn posts_issue_comments_to_forgejo() {
+        let (base, server) = one_shot(200).await;
+        let config = config_with(
+            Some(ForgejoConfig {
+                base_url: base,
+                token: Some("secret".into()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("http://forge.local/a/b/issues/7#issuecomment-1").unwrap();
+        api.post_comment(&location, "hello there").await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/v1/repos/a/b/issues/7/comments "));
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: token secret")
+        );
+        assert!(request.contains("hello there"));
+    }
+
+    #[tokio::test]
+    async fn posts_issue_comments_to_github() {
+        let (base, server) = one_shot(200).await;
+        let config = config_with(
+            None,
+            Some(crate::config::GithubConfig {
+                base_url: base,
+                token: Some("gh".into()),
+                ..Default::default()
+            }),
+            None,
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("https://github.com/a/b/issues/7#issuecomment-1").unwrap();
+        api.post_comment(&location, "hello there").await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /repos/a/b/issues/7/comments "));
+        assert!(request.to_lowercase().contains("authorization: bearer gh"));
+        assert!(request.contains("accept: application/vnd.github+json"));
+    }
+
+    #[tokio::test]
+    async fn posts_issue_notes_to_gitlab() {
+        let (base, server) = one_shot(200).await;
+        let config = config_with(
+            None,
+            None,
+            Some(crate::config::GitlabConfig {
+                base_url: base,
+                token: Some("gl".into()),
+                ..Default::default()
+            }),
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("https://gitlab.com/a/b/issues/7#note_1").unwrap();
+        api.post_comment(&location, "hello there").await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/v4/projects/a%2Fb/issues/7/notes "));
+        assert!(request.to_lowercase().contains("private-token: gl"));
+    }
+
+    #[tokio::test]
+    async fn posts_merge_request_notes_to_gitlab() {
+        let (base, server) = one_shot(200).await;
+        let config = config_with(
+            None,
+            None,
+            Some(crate::config::GitlabConfig {
+                base_url: base,
+                ..Default::default()
+            }),
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("https://gitlab.com/a/b/merge_requests/7").unwrap();
+        api.post_comment(&location, "hello").await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/v4/projects/a%2Fb/merge_requests/7/notes "));
+    }
+
+    #[tokio::test]
+    async fn unknown_forge_cannot_post() {
+        let api = HttpForgeApi::new(Config::default()).unwrap();
+        let location = Url::parse("https://example.com/a/b/issues/7").unwrap();
+        // `example.com` defaults to Forgejo, which is not configured here.
+        let error = api.post_comment(&location, "hi").await.unwrap_err();
+        assert!(error.to_string().contains("forgejo is not configured"));
+    }
+
+    #[tokio::test]
+    async fn forgejo_requires_an_issue_number() {
+        let api =
+            HttpForgeApi::new(config_with(Some(ForgejoConfig::default()), None, None)).unwrap();
+        let location = Url::parse("http://forge.local/a/b").unwrap();
+        let error = api.post_comment(&location, "hi").await.unwrap_err();
+        assert!(error.to_string().contains("no issue number"));
+    }
+
+    #[tokio::test]
+    async fn forbidden_responses_are_permission_errors() {
+        let (base, server) = one_shot(403).await;
+        let config = config_with(
+            Some(ForgejoConfig {
+                base_url: base,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("http://forge.local/a/b/issues/7").unwrap();
+        let error = api.post_comment(&location, "hi").await.unwrap_err();
+        assert!(matches!(error, BotError::ForgePermissionDenied(_)));
+        assert!(server.await.unwrap().starts_with("POST "));
+    }
+
+    #[tokio::test]
+    async fn server_errors_are_forge_api_errors() {
+        let (base, server) = one_shot(500).await;
+        let config = config_with(
+            Some(ForgejoConfig {
+                base_url: base,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("http://forge.local/a/b/issues/7").unwrap();
+        let error = api.post_comment(&location, "hi").await.unwrap_err();
+        assert!(matches!(error, BotError::ForgeApi(_)));
+        assert!(error.to_string().contains("denied"));
+        assert!(server.await.unwrap().starts_with("POST "));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_responses_are_permission_errors() {
+        let (base, server) = one_shot(401).await;
+        let config = config_with(
+            Some(ForgejoConfig {
+                base_url: base,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+        let location = Url::parse("http://forge.local/a/b/issues/7").unwrap();
+        let error = api.post_comment(&location, "hi").await.unwrap_err();
+        assert!(matches!(error, BotError::ForgePermissionDenied(_)));
+        assert!(server.await.unwrap().starts_with("POST "));
+    }
 }

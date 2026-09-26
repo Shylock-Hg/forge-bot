@@ -679,5 +679,178 @@ mod tests {
         assert!(verify_hmac_sha256(secret, body, &format!("sha256={sig}")));
         assert!(!verify_hmac_sha256(secret, body, "deadbeef"));
         assert!(!verify_hmac_sha256(secret, b"other", &sig));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(constant_time_eq(b"abc", b"abc"));
+    }
+
+    fn comment_body(payload: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&payload).unwrap()
+    }
+
+    #[test]
+    fn parse_comment_payload_handles_location_fallbacks() {
+        // The comment html_url wins.
+        let body = comment_body(serde_json::json!({
+            "action": "created",
+            "issue": {"number": 4, "title": "t", "html_url": "http://f/a/b/issues/4"},
+            "comment": {"id": 9, "body": "@agent hi", "html_url": "http://f/a/b/issues/4#issuecomment-9", "user": {"login": "alice"}},
+            "repository": {"full_name": "a/b"}
+        }));
+        let messages = parse_comment_payload(
+            ForgeKind::Forgejo,
+            "http://fallback",
+            &body,
+            "issue_comment",
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].location.as_str(),
+            "http://f/a/b/issues/4#issuecomment-9"
+        );
+        assert_eq!(messages[0].author, "alice");
+        assert_eq!(messages[0].number, Some(4));
+        assert!(!messages[0].is_pull_request);
+
+        // No comment html_url: fall back to the issue html_url.
+        let body = comment_body(serde_json::json!({
+            "issue": {"number": 4, "html_url": "http://f/a/b/issues/4"},
+            "comment": {"id": 9, "body": "@agent hi"},
+            "repository": {"full_name": "a/b"}
+        }));
+        let messages = parse_comment_payload(
+            ForgeKind::Forgejo,
+            "http://fallback",
+            &body,
+            "issue_comment",
+        )
+        .unwrap();
+        assert_eq!(messages[0].location.as_str(), "http://f/a/b/issues/4");
+
+        // Only a broken html_url: build from the repository html_url.
+        let body = comment_body(serde_json::json!({
+            "issue": {"number": 4, "html_url": "not a url"},
+            "comment": {"id": 9, "body": "@agent hi", "html_url": "also bad"},
+            "repository": {"full_name": "a/b", "html_url": "http://f/a/b"}
+        }));
+        let messages = parse_comment_payload(
+            ForgeKind::Forgejo,
+            "http://fallback",
+            &body,
+            "issue_comment",
+        )
+        .unwrap();
+        assert_eq!(messages[0].location.as_str(), "http://f/a/b/issues/4");
+
+        // No repository html_url: build from base_url and full_name.
+        let body = comment_body(serde_json::json!({
+            "issue": {"number": 4},
+            "comment": {"id": 9, "body": "@agent hi"},
+            "repository": {"full_name": "a/b"}
+        }));
+        let messages =
+            parse_comment_payload(ForgeKind::Forgejo, "http://base", &body, "issue_comment")
+                .unwrap();
+        assert_eq!(messages[0].location.as_str(), "http://base/a/b/issues/4");
+    }
+
+    #[test]
+    fn parse_comment_payload_handles_pull_request_shape() {
+        let body = comment_body(serde_json::json!({
+            "action": "created",
+            "pull_request": {"number": 5, "title": "pr", "body": "Fixes #2", "user": {"login": "bob"}},
+            "comment": {"id": 1, "body": "@agent go", "html_url": "http://f/a/b/pulls/5#issuecomment-1", "user": {"login": "bob"}},
+            "repository": {"full_name": "a/b"}
+        }));
+        let messages =
+            parse_comment_payload(ForgeKind::GitHub, "http://f", &body, "pull_request_comment")
+                .unwrap();
+        assert!(messages[0].is_pull_request);
+        assert_eq!(messages[0].author, "bob");
+        assert_eq!(messages[0].comment_id, Some(1));
+        assert_eq!(messages[0].linked_issue.as_ref().unwrap().number, 2);
+        assert_eq!(messages[0].title.as_deref(), Some("pr"));
+    }
+
+    #[test]
+    fn parse_comment_payload_ignores_or_rejects_bad_shapes() {
+        let cases: Vec<(&[u8], bool)> = vec![
+            (
+                br#"{"action":"deleted","comment":{},"repository":{"full_name":"a/b"}}"#,
+                true,
+            ),
+            (br#"{"repository":{"full_name":"a/b"}}"#, false),
+            (
+                br#"{"comment":{"id":1},"repository":{"full_name":"a/b"}}"#,
+                true,
+            ),
+            (br#"{"comment":{"id":1,"body":"x"}}"#, false),
+            (br#"{"comment":{"id":1,"body":"x"},"repository":{}}"#, false),
+            (b"not json", false),
+        ];
+        for (body, should_be_empty) in cases {
+            let result =
+                parse_comment_payload(ForgeKind::Forgejo, "http://f", body, "issue_comment");
+            if should_be_empty {
+                assert!(
+                    result.unwrap().is_empty(),
+                    "body: {}",
+                    String::from_utf8_lossy(body)
+                );
+            } else {
+                assert!(result.is_err(), "body: {}", String::from_utf8_lossy(body));
+            }
+        }
+    }
+
+    #[test]
+    fn parse_description_payload_handles_shapes() {
+        // A pull-request description builds a PR location and links its issue.
+        let body = comment_body(serde_json::json!({
+            "action": "opened",
+            "pull_request": {"number": 5, "title": "pr", "body": "Closes #12", "user": {"login": "bob"}},
+            "repository": {"full_name": "a/b", "html_url": "http://f/a/b"}
+        }));
+        let messages =
+            parse_description_payload(ForgeKind::GitHub, "http://f", &body, "pull_request")
+                .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_pull_request);
+        assert_eq!(messages[0].location.as_str(), "http://f/a/b/pulls/5");
+        assert_eq!(messages[0].linked_issue.as_ref().unwrap().number, 12);
+        assert_eq!(messages[0].comment_id, None);
+
+        // An issue description uses the issues resource.
+        let body = comment_body(serde_json::json!({
+            "action": "edited",
+            "issue": {"number": 7, "body": "hello", "html_url": "http://f/a/b/issues/7"},
+            "repository": {"full_name": "a/b"}
+        }));
+        let messages =
+            parse_description_payload(ForgeKind::GitHub, "http://f", &body, "issues").unwrap();
+        assert!(!messages[0].is_pull_request);
+        assert_eq!(messages[0].linked_issue, None);
+        assert_eq!(messages[0].location.as_str(), "http://f/a/b/issues/7");
+
+        // Non-actionable / incomplete payloads are dropped.
+        for raw in [
+            serde_json::json!({"action": "closed", "issue": {"body": "x"}}),
+            serde_json::json!({"action": "opened", "repository": {"full_name": "a/b"}}),
+            serde_json::json!({"action": "opened", "issue": {"body": "   "}, "repository": {"full_name": "a/b"}}),
+        ] {
+            let raw = serde_json::to_vec(&raw).unwrap();
+            assert!(
+                parse_description_payload(ForgeKind::GitHub, "http://f", &raw, "issues")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        // A missing repository is a hard error.
+        let raw = br#"{"issue":{"body":"x"}}"#;
+        assert!(parse_description_payload(ForgeKind::GitHub, "http://f", raw, "issues").is_err());
+        let raw = br#"{"issue":{"body":"x"},"repository":{}}"#;
+        assert!(parse_description_payload(ForgeKind::GitHub, "http://f", raw, "issues").is_err());
     }
 }

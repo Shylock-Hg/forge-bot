@@ -144,3 +144,93 @@ pub async fn poll(config: Config) -> Result<()> {
     poller.run().await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, ForgejoConfig, GithubConfig, GitlabConfig};
+
+    fn config_with_all_forges(dir: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.session.dir = dir.to_path_buf();
+        config.workspace.enabled = false;
+        config.reply.ack = false;
+        config.reply.result = false;
+        config.forges.forgejo = Some(ForgejoConfig {
+            base_url: "http://forge.example.com".into(),
+            bot_username: Some("forgejo-bot".into()),
+            ..Default::default()
+        });
+        config.forges.github = Some(GithubConfig {
+            base_url: "http://github.example.com".into(),
+            bot_username: Some("github-bot".into()),
+            ..Default::default()
+        });
+        config.forges.gitlab = Some(GitlabConfig {
+            base_url: "http://gitlab.example.com".into(),
+            bot_username: Some("gitlab-bot".into()),
+            ..Default::default()
+        });
+        config
+    }
+
+    #[test]
+    fn init_tracing_is_idempotent() {
+        init_tracing();
+        init_tracing();
+    }
+
+    #[test]
+    fn builds_an_adapter_for_every_configured_forge() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_all_forges(dir.path());
+        let adapters = build_adapters(&config);
+        for name in ["forgejo", "gitea", "github", "gitlab"] {
+            assert!(adapters.contains_key(name), "missing adapter {name}");
+        }
+
+        // An empty configuration wires no adapters.
+        assert!(build_adapters(&Config::default()).is_empty());
+    }
+
+    #[test]
+    fn policy_ignores_every_configured_bot_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_all_forges(dir.path());
+        let policy = build_policy(&config);
+        assert!(policy.is_ignored("forgejo-bot"));
+        assert!(policy.is_ignored("github-bot"));
+        assert!(policy.is_ignored("gitlab-bot"));
+    }
+
+    #[tokio::test]
+    async fn build_app_wires_adapters_and_dispatcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_all_forges(dir.path());
+        let app = build_app(config).unwrap();
+        assert_eq!(app.adapters.len(), 4);
+        assert!(app.config.forges.github.is_some());
+    }
+
+    #[tokio::test]
+    async fn serve_binds_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_with_all_forges(dir.path());
+        config.bind = "127.0.0.1:0".into();
+        let handle = tokio::spawn(serve(config));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn poll_starts_the_ingester() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_with_all_forges(dir.path());
+        config.poller.interval_secs = 1;
+        let handle = tokio::spawn(poll(config));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.abort();
+        let _ = handle.await;
+    }
+}

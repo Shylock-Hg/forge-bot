@@ -126,4 +126,52 @@ mod tests {
         assert_eq!(msgs[0].forge, ForgeKind::GitHub);
         assert_eq!(msgs[0].number, Some(12));
     }
+
+    #[test]
+    fn metadata_and_verification() {
+        let a = GithubAdapter::new(&GithubConfig {
+            base_url: String::new(),
+            webhook_secret: None,
+            token: Some("t".into()),
+            bot_username: Some("bot".into()),
+        });
+        assert_eq!(a.base_url(), "https://github.com");
+        assert_eq!(a.bot_username(), Some("bot"));
+        assert_eq!(a.kind(), ForgeKind::GitHub);
+        assert_eq!(a.slug(), "github");
+        // No secret configured: verification is skipped.
+        assert!(a.verify(&HeaderMap::new(), b"body").is_ok());
+
+        let signed = GithubAdapter::new(&GithubConfig {
+            base_url: "https://github.example.com/".into(),
+            webhook_secret: Some("s".into()),
+            ..Default::default()
+        });
+        assert_eq!(signed.base_url(), "https://github.example.com");
+        // Missing signature header.
+        assert!(matches!(
+            signed.verify(&HeaderMap::new(), b"body").unwrap_err(),
+            BotError::Verification(_)
+        ));
+        // Wrong signature.
+        let mut bad = HeaderMap::new();
+        bad.insert("x-hub-signature-256", "sha256=deadbeef".parse().unwrap());
+        assert!(signed.verify(&bad, b"body").is_err());
+    }
+
+    #[test]
+    fn ignores_non_issue_events_and_parses_empty_event() {
+        let a = GithubAdapter::new(&GithubConfig::default());
+        let mut push = HeaderMap::new();
+        push.insert("x-github-event", "push".parse().unwrap());
+        assert!(a.parse(&push, b"{}").unwrap().is_empty());
+
+        let raw = r#"{
+            "issue": {"number": 1},
+            "comment": {"id": 1, "body": "@agent go"},
+            "repository": {"full_name": "o/r"}
+        }"#;
+        let msgs = a.parse(&HeaderMap::new(), raw.as_bytes()).unwrap();
+        assert_eq!(msgs.len(), 1);
+    }
 }

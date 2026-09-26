@@ -458,6 +458,39 @@ mod tests {
         h
     }
 
+    #[test]
+    fn metadata_and_signature_handling() {
+        let with_secret = adapter();
+        assert_eq!(with_secret.base_url(), "http://forge.local:3000");
+        assert_eq!(with_secret.bot_username(), Some("botty"));
+        assert_eq!(with_secret.kind(), ForgeKind::Forgejo);
+        assert_eq!(with_secret.slug(), "forgejo");
+
+        // A missing signature is rejected.
+        assert!(matches!(
+            with_secret.verify(&HeaderMap::new(), b"body").unwrap_err(),
+            BotError::Verification(_)
+        ));
+        let sig = hmac_sha256_hex(b"hush", b"body");
+        // The Gitea header name is accepted as an alias.
+        let mut gitea = HeaderMap::new();
+        gitea.insert("x-gitea-signature", sig.parse().unwrap());
+        assert!(with_secret.verify(&gitea, b"body").is_ok());
+        // A wrong signature is rejected, a correct one accepted.
+        let mut bad = headers("issue_comment", Some("deadbeef"));
+        assert!(with_secret.verify(&bad, b"body").is_err());
+        bad.insert("x-forgejo-signature", sig.parse().unwrap());
+        assert!(with_secret.verify(&bad, b"body").is_ok());
+
+        // No configured secret skips verification.
+        let no_secret = ForgejoAdapter::new(&ForgejoConfig {
+            base_url: "http://x/".into(),
+            ..Default::default()
+        });
+        assert_eq!(no_secret.base_url(), "http://x");
+        assert!(no_secret.verify(&HeaderMap::new(), b"body").is_ok());
+    }
+
     const PAYLOAD: &str = r#"{
         "action": "created",
         "issue": {

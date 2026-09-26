@@ -1,4 +1,5 @@
 /target
+/coverage.json
 **/*.rs.bk
 __pycache__/
 *.pyc

@@ -41,6 +41,11 @@ struct Harness {
 
 #[allow(clippy::field_reassign_with_default)]
 fn harness(dir: &std::path::Path) -> Harness {
+    harness_with(dir, |_| {})
+}
+
+#[allow(clippy::field_reassign_with_default)]
+fn harness_with(dir: &std::path::Path, configure: impl FnOnce(&mut Config)) -> Harness {
     let mut config = Config::default();
     config.bind = "127.0.0.1:0".into();
     config.policy.allow_all = true;
@@ -64,6 +69,7 @@ fn harness(dir: &std::path::Path) -> Harness {
             ..Default::default()
         },
     );
+    configure(&mut config);
 
     let config = Arc::new(config);
     let adapters = forge_bot::build_adapters(&config);
@@ -258,4 +264,140 @@ async fn unknown_forge_returns_404() {
         .unwrap();
     let response = harness.app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn root_lists_forges_and_healthz_is_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+
+    let root = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(root.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(root.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("forge-bot"));
+    assert!(text.contains("forgejo"));
+    assert!(text.contains("custom"));
+
+    let health = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn duplicate_deliveries_are_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+
+    for _ in 0..2 {
+        let response = harness
+            .app
+            .clone()
+            .oneshot(signed_request("issue_comment", PAYLOAD))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    for _ in 0..200 {
+        if harness.sessions.pending_jobs().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let session = harness
+        .sessions
+        .get("forgejo:shylock/forge-bot:issue:1")
+        .expect("session should exist");
+    assert_eq!(session.runs.len(), 1, "the duplicate must be dropped");
+}
+
+#[tokio::test]
+async fn malformed_payload_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(signed_request("issue_comment", "not json"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn unknown_agent_is_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+    let payload = PAYLOAD.replace("@agent:custom", "@agent:missing");
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(signed_request("issue_comment", &payload))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(harness.sessions.pending_jobs().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unauthorized_trigger_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness_with(dir.path(), |config| {
+        config.policy.allow_all = false;
+        config.policy.allowed_users = vec!["someone-else".into()];
+    });
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(signed_request("issue_comment", PAYLOAD))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(harness.sessions.pending_jobs().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn comment_from_the_bot_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+    let payload = PAYLOAD.replace(
+        "\"user\": {\"login\": \"shylock\"}",
+        "\"user\": {\"login\": \"shylock-bot\"}",
+    );
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(signed_request("issue_comment", &payload))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(harness.sessions.pending_jobs().unwrap().is_empty());
 }

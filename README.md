@@ -258,11 +258,16 @@ src/
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
+./contrib/coverage.sh --fail-under-lines 95
 ```
 
 The test suite covers URL parsing, mention extraction, HMAC verification,
 payload normalization for all three forges, policy decisions, session
 persistence, the dispatcher, and an end-to-end signed webhook flow.
+
+CI runs the suite through `cargo-llvm-cov` and posts the result as a comment on
+the pull request (updating the same comment on every push), using
+[`contrib/coverage-comment.sh`](contrib/coverage-comment.sh).
 
 ## Research notes
 

@@ -4,6 +4,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   test:
     runs-on: self-hosted
@@ -15,3 +20,17 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+            mkdir -p "$HOME/.cargo/bin"
+            curl -sSL https://github.com/taiki-e/cargo-llvm-cov/releases/latest/download/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz | tar -xz -C "$HOME/.cargo/bin"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Coverage
+        run: ./contrib/coverage.sh --json --summary-only --output-path coverage.json --fail-under-lines 95
+      - name: Post coverage report
+        if: ${{ always() }}
+        env:
+          COVERAGE_MIN_LINES: "95"
+        run: ./contrib/coverage-comment.sh coverage.json

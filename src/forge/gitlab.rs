@@ -290,4 +290,97 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn verify_handles_missing_secret_and_header() {
+        let no_secret = GitlabAdapter::new(&GitlabConfig {
+            base_url: String::new(),
+            webhook_secret: None,
+            bot_username: Some("bot".into()),
+            ..Default::default()
+        });
+        assert_eq!(no_secret.base_url(), "https://gitlab.com");
+        assert_eq!(no_secret.bot_username(), Some("bot"));
+        assert_eq!(no_secret.kind(), ForgeKind::GitLab);
+        assert_eq!(no_secret.slug(), "gitlab");
+        assert!(no_secret.verify(&HeaderMap::new(), b"").is_ok());
+
+        let with_secret = adapter();
+        let error = with_secret.verify(&HeaderMap::new(), b"").unwrap_err();
+        assert!(matches!(error, BotError::Verification(_)));
+    }
+
+    #[test]
+    fn ignores_non_note_and_system_events() {
+        let a = adapter();
+        let mut h = HeaderMap::new();
+        h.insert("x-gitlab-event", "Push Hook".parse().unwrap());
+        assert!(
+            a.parse(&h, br#"{"object_kind":"push"}"#)
+                .unwrap()
+                .is_empty()
+        );
+
+        let system = r#"{
+            "object_kind": "note",
+            "project": {"path_with_namespace": "g/p"},
+            "object_attributes": {"system": true, "note": "label added"}
+        }"#;
+        assert!(
+            a.parse(&HeaderMap::new(), system.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parses_issue_note_without_an_event_header() {
+        let a = adapter();
+        let raw = r#"{
+            "object_kind": "note",
+            "user": {"username": "dev"},
+            "project": {"path_with_namespace": "group/proj",
+                        "web_url": "https://gitlab.example.com/group/proj"},
+            "object_attributes": {
+                "note": "@agent fix this",
+                "id": 7,
+                "system": false,
+                "noteable_type": "Issue",
+                "url": "https://gitlab.example.com/group/proj/-/issues/3#note_7"
+            },
+            "issue": {"iid": 3, "title": "Bug"}
+        }"#;
+        let msgs = a.parse(&HeaderMap::new(), raw.as_bytes()).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(!msgs[0].is_pull_request);
+        assert_eq!(msgs[0].number, Some(3));
+        assert_eq!(msgs[0].title.as_deref(), Some("Bug"));
+        assert_eq!(msgs[0].linked_issue, None);
+    }
+
+    #[test]
+    fn rejects_incomplete_payloads() {
+        let a = adapter();
+        // Missing object_attributes.
+        assert!(
+            a.parse(&HeaderMap::new(), br#"{"object_kind":"note"}"#)
+                .is_err()
+        );
+        // Missing note body is simply ignored.
+        let no_note = br#"{"object_kind":"note","object_attributes":{"system":false}}"#;
+        assert!(a.parse(&HeaderMap::new(), no_note).unwrap().is_empty());
+        // Missing project.
+        let no_project =
+            br#"{"object_kind":"note","object_attributes":{"system":false,"note":"x"}}"#;
+        assert!(a.parse(&HeaderMap::new(), no_project).is_err());
+        // Missing path_with_namespace.
+        let no_path = br#"{"object_kind":"note","project":{},"object_attributes":{"system":false,"note":"x"}}"#;
+        assert!(a.parse(&HeaderMap::new(), no_path).is_err());
+        // No URL anywhere.
+        let no_url = br#"{"object_kind":"note","project":{"path_with_namespace":"g/p"},"object_attributes":{"system":false,"note":"x"}}"#;
+        assert!(matches!(
+            a.parse(&HeaderMap::new(), no_url).unwrap_err(),
+            BotError::InvalidLocation { .. }
+        ));
+    }
 }

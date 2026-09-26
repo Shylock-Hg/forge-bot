@@ -450,4 +450,544 @@ mod tests {
         assert!(message.is_pull_request);
         assert_eq!(message.number, Some(5));
     }
+
+    #[test]
+    fn invalid_time_is_preserved() {
+        assert_eq!(normalize_time("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    #[test]
+    fn incomplete_comments_are_dropped() {
+        // No body.
+        assert!(message_from_comment("o/r", &json!({ "html_url": "http://x/1" })).is_none());
+        // Body but no parseable html_url.
+        assert!(
+            message_from_comment("o/r", &json!({ "body": "hi" })).is_none(),
+            "comments without a location are dropped"
+        );
+        // Missing optional fields fall back to defaults.
+        let comment = json!({
+            "id": 9,
+            "body": "hi",
+            "html_url": "http://x/o/r/issues/1#issuecomment-9",
+            "user": {}
+        });
+        let message = message_from_comment("o/r", &comment).unwrap();
+        assert_eq!(message.author, "");
+        assert_eq!(message.number, None);
+        assert!(!message.is_pull_request);
+        assert_eq!(message.comment_id, Some(9));
+    }
+
+    #[test]
+    fn search_page_handles_shapes() {
+        assert!(repos_from_search_page(&json!({ "data": [] })).is_empty());
+        assert!(repos_from_search_page(&json!({})).is_empty());
+        // Missing flags default to "has issues" and "not archived".
+        assert_eq!(
+            repos_from_search_page(&json!({
+                "data": [{ "full_name": "a/b" }]
+            })),
+            vec!["a/b".to_owned()]
+        );
+    }
+
+    // --- Integration-style tests against a local mock Forgejo API. -------------
+    //
+    // These drive the real `Poller` over HTTP so the request construction,
+    // cursor handling, repository discovery, and error branches stay covered
+    // without touching a live forge.
+
+    use crate::agent::AgentRegistry;
+    use crate::config::{AgentConfig, ForgejoConfig};
+    use crate::forge_api::NoopForgeApi;
+    use crate::session::{Dispatcher, SessionStore};
+
+    #[derive(Clone)]
+    enum MockReply {
+        Json(Value),
+        Status(u16),
+    }
+
+    #[derive(Default)]
+    struct MockState {
+        search: Mutex<Vec<Value>>,
+        search_status: Mutex<Option<u16>>,
+        comments: Mutex<HashMap<String, MockReply>>,
+        requests: Mutex<Vec<String>>,
+    }
+
+    async fn mock_handler(
+        axum::extract::State(state): axum::extract::State<Arc<MockState>>,
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push(format!("{method} {uri}"));
+        let path = uri.path().to_owned();
+
+        if path == "/api/v1/repos/search" {
+            if let Some(code) = *state.search_status.lock().unwrap() {
+                return axum::http::StatusCode::from_u16(code)
+                    .unwrap()
+                    .into_response();
+            }
+            let page = uri
+                .query()
+                .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("page=")))
+                .and_then(|page| page.parse::<usize>().ok())
+                .unwrap_or(1);
+            let body = state
+                .search
+                .lock()
+                .unwrap()
+                .get(page.saturating_sub(1))
+                .cloned()
+                .unwrap_or_else(|| json!({ "data": [] }));
+            return axum::response::Json(body).into_response();
+        }
+
+        if let Some(repo) = path
+            .strip_prefix("/api/v1/repos/")
+            .and_then(|rest| rest.strip_suffix("/issues/comments"))
+        {
+            match state.comments.lock().unwrap().get(repo).cloned() {
+                Some(MockReply::Json(value)) => {
+                    return axum::response::Json(value).into_response();
+                }
+                Some(MockReply::Status(code)) => {
+                    return axum::http::StatusCode::from_u16(code)
+                        .unwrap()
+                        .into_response();
+                }
+                None => return axum::http::StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+
+        axum::http::StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn start_mock(state: Arc<MockState>) -> String {
+        let app = axum::Router::new().fallback(mock_handler).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_config(dir: &std::path::Path, base_url: &str) -> Config {
+        let mut config = Config::default();
+        config.policy.allow_all = true;
+        config.workspace.enabled = false;
+        config.reply.ack = false;
+        config.reply.result = false;
+        config.session.dir = dir.to_path_buf();
+        config.session.workers = 1;
+        config.agent_sequence = vec!["custom".into()];
+        config.forges.forgejo = Some(ForgejoConfig {
+            base_url: base_url.to_owned(),
+            token: Some("tok".into()),
+            webhook_secret: None,
+            bot_username: Some("shylock-bot".into()),
+        });
+        config.agents.overrides.insert(
+            "custom".into(),
+            AgentConfig {
+                command: Some("cat".into()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    fn build_poller(config: Config) -> (Poller, Arc<SessionStore>) {
+        let config = Arc::new(config);
+        let sessions = Arc::new(SessionStore::open(&config.session.dir).unwrap());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            Arc::new(AgentRegistry::from_config(&config)),
+            sessions.clone(),
+            Arc::new(NoopForgeApi),
+            crate::build_policy(&config),
+        )
+        .unwrap();
+        (Poller::new(config, dispatcher).unwrap(), sessions)
+    }
+
+    fn comment(id: i64, body: &str, author: &str) -> Value {
+        json!({
+            "id": id,
+            "body": body,
+            "html_url": format!("http://forge.local:3000/o/r/issues/3#issuecomment-{id}"),
+            "issue_url": "http://forge.local:3000/o/r/issues/3",
+            "pull_request_url": "",
+            "user": { "login": author },
+            "created_at": "2026-09-24T20:49:34+08:00"
+        })
+    }
+
+    #[tokio::test]
+    async fn polls_explicit_repositories_and_persists_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state.comments.lock().unwrap().insert(
+            "o/r".into(),
+            MockReply::Json(json!([comment(1, "@agent go", "alice")])),
+        );
+        let base = start_mock(state.clone()).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec!["o/r".into()];
+        let (poller, _sessions) = build_poller(config);
+
+        poller.tick().await.unwrap();
+
+        assert!(
+            state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.starts_with("GET /api/v1/repos/o/r/issues/comments?"))
+        );
+
+        let raw = std::fs::read_to_string(poller.state_path.clone()).unwrap();
+        let cursors: HashMap<String, Cursor> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(cursors["o/r"].last_id, 1);
+        assert_eq!(
+            cursors["o/r"].last_time.as_deref(),
+            Some("2026-09-24T12:49:34Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn since_query_reuses_the_stored_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state
+            .comments
+            .lock()
+            .unwrap()
+            .insert("o/r".into(), MockReply::Json(json!([])));
+        let base = start_mock(state.clone()).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec!["o/r".into()];
+        let (poller, _sessions) = build_poller(config);
+        poller.set_cursor(
+            "o/r",
+            Cursor {
+                last_id: 7,
+                last_time: Some("2026-09-24T12:00:00Z".into()),
+            },
+        );
+
+        poller.tick().await.unwrap();
+
+        let requests = state.requests.lock().unwrap();
+        let comments = requests
+            .iter()
+            .find(|request| request.contains("/repos/o/r/issues/comments"))
+            .expect("comments request");
+        assert!(
+            comments.contains("since=2026-09-24T12%3A00%3A00Z")
+                || comments.contains("since=2026-09-24T12:00:00Z"),
+            "unexpected since: {comments}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovers_repositories_and_uses_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        *state.search.lock().unwrap() = vec![
+            json!({"data": [
+                {"full_name": "a/one", "has_issues": true, "archived": false},
+                {"full_name": "a/skip", "has_issues": false, "archived": false}
+            ]}),
+            json!({"data": [
+                {"full_name": "a/two", "has_issues": true, "archived": false}
+            ]}),
+        ];
+        for repo in ["a/one", "a/two"] {
+            state
+                .comments
+                .lock()
+                .unwrap()
+                .insert(repo.into(), MockReply::Json(json!([])));
+        }
+        let base = start_mock(state.clone()).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.page_limit = 2;
+        config.poller.discover_interval_secs = 300;
+        let (poller, _sessions) = build_poller(config);
+
+        poller.tick().await.unwrap();
+        let searches = state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with("GET /api/v1/repos/search"))
+            .count();
+        assert_eq!(searches, 2, "a full page must be followed by a second page");
+        assert!(
+            state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("/repos/a/one/issues/comments"))
+        );
+        assert!(
+            !state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("/repos/a/skip/issues/comments")),
+            "repositories without issues must be skipped"
+        );
+
+        // The second tick is served from the discovery cache.
+        let before = state.requests.lock().unwrap().len();
+        poller.tick().await.unwrap();
+        let searches = state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(before)
+            .filter(|request| request.starts_with("GET /api/v1/repos/search"))
+            .count();
+        assert_eq!(searches, 0);
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_without_cache_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        *state.search_status.lock().unwrap() = Some(500);
+        let base = start_mock(state).await;
+
+        let config = test_config(dir.path(), &base);
+        let (poller, _sessions) = build_poller(config);
+        assert!(poller.tick().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_keeps_the_cached_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        *state.search.lock().unwrap() = vec![json!({"data": [
+            {"full_name": "a/one", "has_issues": true, "archived": false}
+        ]})];
+        state
+            .comments
+            .lock()
+            .unwrap()
+            .insert("a/one".into(), MockReply::Json(json!([])));
+        let base = start_mock(state.clone()).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.page_limit = 2;
+        config.poller.discover_interval_secs = 1;
+        let (poller, _sessions) = build_poller(config);
+        poller.tick().await.unwrap();
+
+        // Force the cache stale and make discovery fail.
+        {
+            let mut cache = poller.repos.lock().unwrap();
+            cache.refreshed = Some(Instant::now() - Duration::from_secs(60));
+        }
+        *state.search_status.lock().unwrap() = Some(500);
+
+        poller.tick().await.unwrap();
+        assert!(
+            state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.contains("/repos/a/one/issues/comments"))
+                .count()
+                >= 2,
+            "the cached repository is still polled"
+        );
+    }
+
+    #[tokio::test]
+    async fn inaccessible_and_failing_repositories_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        {
+            let mut comments = state.comments.lock().unwrap();
+            comments.insert("o/forbidden".into(), MockReply::Status(403));
+            comments.insert("o/missing".into(), MockReply::Status(404));
+            comments.insert("o/unauthorized".into(), MockReply::Status(401));
+            comments.insert("o/error".into(), MockReply::Status(500));
+            comments.insert("o/ok".into(), MockReply::Json(json!([])));
+        }
+        let base = start_mock(state.clone()).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec![
+            "o/forbidden".into(),
+            "o/missing".into(),
+            "o/unauthorized".into(),
+            "o/error".into(),
+            "o/ok".into(),
+        ];
+        let (poller, _sessions) = build_poller(config);
+
+        // A failing repo is logged and the sweep continues.
+        poller.tick().await.unwrap();
+        assert!(
+            state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("/repos/o/ok/issues/comments"))
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_ignores_own_comments_unmentioned_and_unknown_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state.comments.lock().unwrap().insert(
+            "o/r".into(),
+            MockReply::Json(json!([
+                comment(1, "@agent:custom go", "shylock-bot"),
+                comment(2, "just chatting", "alice"),
+                comment(3, "@agent:missing go", "alice"),
+                comment(4, "@agent:custom go", "alice")
+            ])),
+        );
+        let base = start_mock(state).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec!["o/r".into()];
+        let (poller, sessions) = build_poller(config);
+
+        poller.tick().await.unwrap();
+
+        // Only the fourth comment is a valid trigger for an existing agent.
+        for _ in 0..200 {
+            if sessions.pending_jobs().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let key = "forgejo:o/r:issue:3";
+        let session = sessions
+            .get(key)
+            .expect("the valid mention creates a session");
+        assert_eq!(session.runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_mentions_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state.comments.lock().unwrap().insert(
+            "o/r".into(),
+            MockReply::Json(json!([comment(1, "@agent:custom go", "alice")])),
+        );
+        let base = start_mock(state).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.policy.allow_all = false;
+        config.poller.repositories = vec!["o/r".into()];
+        let (poller, sessions) = build_poller(config);
+
+        poller.tick().await.unwrap();
+        assert!(sessions.pending_jobs().unwrap().is_empty());
+        assert!(sessions.get("forgejo:o/r:issue:3").is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_failure_is_logged_by_tick() {
+        // `tick` swallows per-repository failures; a 500 must not abort the run.
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state
+            .comments
+            .lock()
+            .unwrap()
+            .insert("o/r".into(), MockReply::Status(500));
+        let base = start_mock(state).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec!["o/r".into()];
+        let (poller, _sessions) = build_poller(config);
+        poller.tick().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persist_failure_is_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state
+            .comments
+            .lock()
+            .unwrap()
+            .insert("o/r".into(), MockReply::Json(json!([])));
+        let base = start_mock(state).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec!["o/r".into()];
+        let (mut poller, _sessions) = build_poller(config);
+        poller.state_path = PathBuf::from("/proc/does-not-exist/poller.json");
+        poller.tick().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_loop_ticks_until_aborted() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(MockState::default());
+        state
+            .comments
+            .lock()
+            .unwrap()
+            .insert("o/r".into(), MockReply::Json(json!([])));
+        let base = start_mock(state.clone()).await;
+
+        let mut config = test_config(dir.path(), &base);
+        config.poller.repositories = vec!["o/r".into()];
+        config.poller.interval_secs = 1;
+        let (poller, _sessions) = build_poller(config);
+
+        let handle = tokio::spawn(Arc::new(poller).run());
+        for _ in 0..200 {
+            if state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("/repos/o/r/issues/comments"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle.abort();
+        assert!(
+            state
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("/repos/o/r/issues/comments"))
+        );
+    }
 }

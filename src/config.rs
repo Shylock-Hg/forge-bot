@@ -765,4 +765,226 @@ markers = ["overloaded"]
         // cases the final component is `x`.
         assert!(expand_tilde(Path::new("~/x")).ends_with("x"));
     }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn save_env(keys: &[&str]) -> Vec<(String, Option<std::ffi::OsString>)> {
+        keys.iter()
+            .map(|key| ((*key).to_owned(), std::env::var_os(key)))
+            .collect()
+    }
+
+    fn restore_env(saved: &[(String, Option<std::ffi::OsString>)]) {
+        for (key, value) in saved {
+            // SAFETY: every caller holds `ENV_LOCK` while mutating the process
+            // environment, so no concurrent test observes a partial update.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expands_tilde_with_home_and_non_utf8() {
+        let _guard = env_guard();
+        let saved = save_env(&["HOME"]);
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+        assert_eq!(
+            expand_tilde(Path::new("~/x")),
+            PathBuf::from("/home/tester/x")
+        );
+        assert_eq!(expand_tilde(Path::new("~")), PathBuf::from("/home/tester"));
+        restore_env(&saved);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = std::ffi::OsStr::from_bytes(b"\xFF~");
+            assert_eq!(expand_tilde(Path::new(raw)), PathBuf::from(raw));
+        }
+    }
+
+    #[test]
+    fn credentials_for_each_forge() {
+        let mut config = Config::default();
+        config.forges.forgejo = Some(ForgejoConfig {
+            base_url: "http://forge.example.com".into(),
+            token: Some("ft".into()),
+            ..Default::default()
+        });
+        let creds = config.credentials_for(crate::location::ForgeKind::Forgejo);
+        assert!(creds.contains(&("FORGEJO_URL".into(), "http://forge.example.com".into())));
+        assert!(creds.contains(&("FORGEJO_TOKEN".into(), "ft".into())));
+        assert!(creds.contains(&("GITEA_TOKEN".into(), "ft".into())));
+        assert!(creds.contains(&("FORGE_URL".into(), "http://forge.example.com".into())));
+        assert!(creds.contains(&("FORGE_TOKEN".into(), "ft".into())));
+
+        config.forges.github = Some(GithubConfig {
+            base_url: "http://gh.example.com".into(),
+            token: Some("gt".into()),
+            ..Default::default()
+        });
+        let creds = config.credentials_for(crate::location::ForgeKind::GitHub);
+        assert!(creds.contains(&("GITHUB_URL".into(), "http://gh.example.com".into())));
+        assert!(creds.contains(&("GITHUB_TOKEN".into(), "gt".into())));
+        assert!(creds.contains(&("GH_TOKEN".into(), "gt".into())));
+        assert!(creds.contains(&("FORGE_TOKEN".into(), "gt".into())));
+
+        config.forges.gitlab = Some(GitlabConfig {
+            base_url: "http://gl.example.com".into(),
+            token: Some("lt".into()),
+            ..Default::default()
+        });
+        let creds = config.credentials_for(crate::location::ForgeKind::GitLab);
+        assert!(creds.contains(&("GITLAB_URL".into(), "http://gl.example.com".into())));
+        assert!(creds.contains(&("GITLAB_TOKEN".into(), "lt".into())));
+        assert!(creds.contains(&("FORGE_TOKEN".into(), "lt".into())));
+
+        // An unknown forge exposes no credentials at all.
+        assert!(
+            config
+                .credentials_for(crate::location::ForgeKind::Unknown)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn credentials_without_a_token_are_url_only() {
+        let mut config = Config::default();
+        config.forges.forgejo = Some(ForgejoConfig {
+            base_url: "http://forge.example.com".into(),
+            token: None,
+            ..Default::default()
+        });
+        let creds = config.credentials_for(crate::location::ForgeKind::Gitea);
+        assert!(creds.contains(&("FORGEJO_URL".into(), "http://forge.example.com".into())));
+        assert!(!creds.iter().any(|(key, _)| key == "FORGE_TOKEN"));
+    }
+
+    #[test]
+    fn apply_defaults_fills_blank_fields() {
+        let mut config = Config::default();
+        config.bind.clear();
+        config.mention.clear();
+        config.pi_rpc.command.clear();
+        config.poller.interval_secs = 0;
+        config.poller.discover_interval_secs = 0;
+        config.poller.page_limit = 0;
+        config.workspace.root = PathBuf::new();
+        config.workspace.git_author_name.clear();
+        config.workspace.git_author_email.clear();
+        config.session.dir = PathBuf::new();
+        config.session.workers = 0;
+        config.session.queue_capacity = 0;
+
+        config.apply_defaults();
+
+        assert_eq!(config.bind, "0.0.0.0:8080");
+        assert_eq!(config.mention, "@agent");
+        assert_eq!(config.pi_rpc.command, "pi");
+        assert_eq!(config.poller.interval_secs, 15);
+        assert_eq!(config.poller.discover_interval_secs, 300);
+        assert_eq!(config.poller.page_limit, 50);
+        assert_eq!(
+            config.workspace.root,
+            PathBuf::from("/tmp/forge-bot-workspaces")
+        );
+        assert_eq!(config.workspace.git_author_name, "forge-bot");
+        assert_eq!(config.workspace.git_author_email, "forge-bot@localhost");
+        assert_eq!(config.session.dir, PathBuf::from("/tmp/forge-bot-state"));
+        assert_eq!(config.session.workers, 1);
+        assert_eq!(config.session.queue_capacity, 256);
+    }
+
+    #[test]
+    fn trigger_is_trimmed() {
+        let config = Config {
+            mention: "  @hey  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.trigger(), "@hey");
+    }
+
+    #[test]
+    fn apply_env_overrides_all_fields() {
+        let _guard = env_guard();
+        let keys = [
+            "FORGE_BOT_BIND",
+            "FORGE_BOT_MENTION",
+            "FORGE_BOT_MAX_CONCURRENCY",
+            "FORGE_BOT_WORKSPACE_ROOT",
+            "FORGE_BOT_SESSION_DIR",
+            "FORGEJO_WEBHOOK_SECRET",
+            "FORGEJO_TOKEN",
+            "FORGEJO_BASE_URL",
+            "FORGEJO_BOT_USERNAME",
+        ];
+        let saved = save_env(&keys);
+        unsafe {
+            std::env::set_var("FORGE_BOT_BIND", "1.2.3.4:1234");
+            std::env::set_var("FORGE_BOT_MENTION", "@env");
+            std::env::set_var("FORGE_BOT_MAX_CONCURRENCY", "7");
+            std::env::set_var("FORGE_BOT_WORKSPACE_ROOT", "/tmp/env-ws");
+            std::env::set_var("FORGE_BOT_SESSION_DIR", "/tmp/env-state");
+            std::env::set_var("FORGEJO_WEBHOOK_SECRET", "env-secret");
+            std::env::set_var("FORGEJO_TOKEN", "env-token");
+            std::env::set_var("FORGEJO_BASE_URL", "http://env-forge");
+            std::env::set_var("FORGEJO_BOT_USERNAME", "env-bot");
+        }
+
+        let mut config = Config::default();
+        config.forges.forgejo = Some(ForgejoConfig::default());
+        config.apply_env();
+
+        assert_eq!(config.bind, "1.2.3.4:1234");
+        assert_eq!(config.mention, "@env");
+        assert_eq!(config.session.workers, 7);
+        assert_eq!(config.workspace.root, PathBuf::from("/tmp/env-ws"));
+        assert_eq!(config.session.dir, PathBuf::from("/tmp/env-state"));
+        let forgejo = config.forges.forgejo.unwrap();
+        assert_eq!(forgejo.webhook_secret.as_deref(), Some("env-secret"));
+        assert_eq!(forgejo.token.as_deref(), Some("env-token"));
+        assert_eq!(forgejo.base_url, "http://env-forge");
+        assert_eq!(forgejo.bot_username.as_deref(), Some("env-bot"));
+
+        restore_env(&saved);
+    }
+
+    #[test]
+    fn load_reads_or_falls_back_to_defaults() {
+        let _guard = env_guard();
+        // Keep ambient Forgejo env vars from leaking into the loaded config.
+        let saved = save_env(&["FORGE_BOT_BIND", "FORGE_BOT_MENTION", "FORGEJO_TOKEN"]);
+        unsafe {
+            std::env::remove_var("FORGE_BOT_BIND");
+            std::env::remove_var("FORGE_BOT_MENTION");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "bind = \"127.0.0.1:9999\"\nmention = \"@bot\"\n").unwrap();
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.bind, "127.0.0.1:9999");
+        assert_eq!(config.mention, "@bot");
+
+        // A missing file is fine: the defaults plus env apply.
+        let config = Config::load(Some(&dir.path().join("missing.toml"))).unwrap();
+        assert_eq!(config.bind, "0.0.0.0:8080");
+
+        // Structurally invalid TOML is a configuration error.
+        std::fs::write(&path, "not = [valid").unwrap();
+        let error = Config::load(Some(&path)).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+
+        restore_env(&saved);
+    }
 }
