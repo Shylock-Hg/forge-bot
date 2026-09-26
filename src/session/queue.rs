@@ -305,6 +305,10 @@ impl Inner {
         let mut last_outcome: Option<AgentOutcome> = None;
         let mut used_agent = candidates[0].clone();
         let mut unavailable_hits = 0usize;
+        // Why the previous candidate stopped, so the "switching" notice can
+        // name the right reason. Capacity hits are called out as such; every
+        // other failure reads as a plain failure.
+        let mut previous_was_capacity = false;
 
         for (index, name) in candidates.iter().enumerate() {
             used_agent = name.clone();
@@ -322,9 +326,13 @@ impl Inner {
                 }
             } else if self.config.reply.ack {
                 let previous = &candidates[index - 1];
-                let notice = format!(
-                    "⚠️ Agent **{previous}** hit a capacity limit; switching to **{name}**."
-                );
+                let notice = if previous_was_capacity {
+                    format!(
+                        "⚠️ Agent **{previous}** hit a capacity limit; switching to **{name}**."
+                    )
+                } else {
+                    format!("⚠️ Agent **{previous}** failed; switching to **{name}**.")
+                };
                 self.reply(&job.message, &notice).await;
             }
 
@@ -349,6 +357,7 @@ impl Inner {
                     unavailable_hits += 1;
                     tracing::warn!(job = %job.id, agent = %name, %error, "agent cannot be started");
                     last_outcome = Some(permission_aware_failure(&job, &error));
+                    previous_was_capacity = false;
                     continue;
                 }
                 Err(error) => permission_aware_failure(&job, &error),
@@ -362,6 +371,18 @@ impl Inner {
                 unavailable_hits += 1;
                 tracing::warn!(job = %job.id, agent = %name, "agent hit a capacity limit");
                 last_outcome = Some(outcome);
+                previous_was_capacity = true;
+                continue;
+            }
+
+            if !outcome.success && self.config.capacity.fallback {
+                // The agent never processed the message (non-zero exit, spawn
+                // error, ...). Hand the job to the next candidate exactly like
+                // a capacity hit, so a broken adapter cannot leave the thread
+                // unanswered while a working agent is available.
+                tracing::warn!(job = %job.id, agent = %name, "agent failed; trying the next candidate");
+                last_outcome = Some(outcome);
+                previous_was_capacity = false;
                 continue;
             }
 
@@ -406,23 +427,30 @@ impl Inner {
     async fn finish(&self, key: &str, job: &Job, agent: &str, outcome: &AgentOutcome) {
         self.persist_outcome(key, job, agent, outcome);
 
-        if self.config.reply.result {
-            let status = if outcome.success {
-                "✅ finished"
-            } else {
-                "❌ failed"
-            };
-            let summary = truncate(&outcome.summary, 6000);
-            let body = if summary.trim().is_empty() {
-                format!("🤖 Agent **{agent}** {status} in {:?}.", outcome.duration)
-            } else {
-                format!(
-                    "🤖 Agent **{agent}** {status} in {:?}.\n\n{}",
-                    outcome.duration, summary
-                )
-            };
-            self.reply(&job.message, &body).await;
+        // A successful agent normally posts its own reply, so result comments
+        // stay opt-in. A failed agent may never have received the message and
+        // cannot reply, so failures are always surfaced; otherwise the thread
+        // would go silent. This mirrors `finish_no_agent`, which is likewise
+        // posted unconditionally.
+        if outcome.success && !self.config.reply.result {
+            return;
         }
+
+        let status = if outcome.success {
+            "✅ finished"
+        } else {
+            "❌ failed"
+        };
+        let summary = truncate(&outcome.summary, 6000);
+        let body = if summary.trim().is_empty() {
+            format!("🤖 Agent **{agent}** {status} in {:?}.", outcome.duration)
+        } else {
+            format!(
+                "🤖 Agent **{agent}** {status} in {:?}.\n\n{}",
+                outcome.duration, summary
+            )
+        };
+        self.reply(&job.message, &body).await;
     }
 
     /// Report that no agent can take the job. This is a terminal, actionable
@@ -883,6 +911,20 @@ mod tests {
                 ..Default::default()
             },
         );
+        // A shell that fails for an ordinary, non-capacity reason. Its output
+        // carries no capacity marker, so it must still be retried on the next
+        // candidate just like a capacity hit.
+        config.agents.overrides.insert(
+            "broken-agent".into(),
+            crate::config::AgentConfig {
+                command: Some("sh".into()),
+                args: Some(vec![
+                    "-c".into(),
+                    "echo 'Error: --print took the wrong argument' >&2; exit 2".into(),
+                ]),
+                ..Default::default()
+            },
+        );
         // A shell that echoes its stdin, standing in for a healthy agent.
         config.agents.overrides.insert(
             "good-agent".into(),
@@ -1022,6 +1064,107 @@ mod tests {
         assert_eq!(session.runs[0].success, Some(true));
         assert_eq!(session.runs[0].agent, "good-agent");
         assert!(!registry.is_available("missing-agent"));
+    }
+
+    #[tokio::test]
+    async fn falls_back_when_an_agent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = capacity_config(dir.path());
+        config.reply.ack = true;
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["broken-agent", "good-agent"]);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry.clone(),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("broken-agent".into()),
+                    message: "go".into(),
+                },
+                "broken-agent",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let session = sessions.get(&SessionStore::key(&message("o/r"))).unwrap();
+        assert_eq!(
+            session.runs[0].success,
+            Some(true),
+            "summary: {:?}",
+            session.runs[0].summary
+        );
+        assert_eq!(session.runs[0].agent, "good-agent");
+        // An ordinary failure is not a capacity hit, so the agent stays
+        // available for later jobs.
+        assert!(registry.is_available("broken-agent"));
+        // The hand-off is announced instead of leaving the thread silent.
+        let comments = api.comments();
+        assert!(
+            comments.iter().any(|c| {
+                c.contains("broken-agent") && c.contains("failed") && c.contains("good-agent")
+            }),
+            "the failure hand-off should be announced: {comments:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_is_reported_when_fallback_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = capacity_config(dir.path());
+        config.capacity.fallback = false;
+        // Result replies stay disabled; a failure must be posted anyway.
+        config.reply.result = false;
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["broken-agent"]);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry.clone(),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("broken-agent".into()),
+                    message: "go".into(),
+                },
+                "broken-agent",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let session = sessions.get(&SessionStore::key(&message("o/r"))).unwrap();
+        assert_eq!(session.runs[0].success, Some(false));
+
+        let comments = api.comments();
+        assert!(
+            comments.iter().any(|c| {
+                c.contains("broken-agent")
+                    && c.contains("❌ failed")
+                    && c.contains("wrong argument")
+            }),
+            "a failed run must be reported even with result replies disabled: {comments:?}"
+        );
     }
 
     #[tokio::test]

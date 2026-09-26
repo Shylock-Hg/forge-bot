@@ -463,13 +463,15 @@ pub enum PromptDelivery {
 /// burns another failed run.
 pub const DEFAULT_CAPACITY_COOLDOWN_SECS: u64 = 5 * 60 * 60;
 
-/// How the dispatcher reacts when an agent hits a capacity limit.
+/// How the dispatcher reacts when an agent fails.
 ///
-/// A failed run whose output looks like a quota, rate-limit or
-/// capacity/overload message (see [`crate::agent::capacity`]) marks that agent
-/// as unavailable for `cooldown_secs` and, when `fallback` is enabled, retries
-/// the job with the next available agent. If no agent is available the bot
-/// replies `No available agent`.
+/// When `fallback` is enabled, any failed run is handed to the next available
+/// agent instead of leaving the thread unanswered; a failure whose output
+/// looks like a quota, rate-limit or capacity/overload message (see
+/// [`crate::agent::capacity`]) additionally marks that agent as unavailable for
+/// `cooldown_secs`. Ordinary failures do not disable the agent. If no agent is
+/// available the bot replies `No available agent`, and a run that failed for
+/// any other reason is reported with its error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapacityConfig {

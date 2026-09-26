@@ -47,9 +47,11 @@ ack = true
 result = false
 
 [capacity]
-# When an agent's output looks like a quota, rate-limit or capacity/overload
-# error, mark it unavailable for `cooldown_secs` and (if `fallback` is true)
-# retry the job on the next available agent. When no agent is left the bot
+# When an agent fails, retry the job on the next available agent instead of
+# leaving the thread unanswered. An agent whose output looks like a quota,
+# rate-limit or capacity/overload error is additionally marked unavailable for
+# `cooldown_secs`; an ordinary failure (non-zero exit, spawn error, ...) is
+# reported but does not disable the agent. When no agent is left the bot
 # replies "No available agent". `[quota]` is accepted as an alias.
 fallback = true
 # Five hours, matching the typical agent quota/reset window.
