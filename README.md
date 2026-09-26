@@ -121,6 +121,12 @@ Still open (see the issue's roadmap):
 - [ ] Stronger agent sandboxing / isolation
 - [ ] Per-repository agent selection
 
+## Releases
+
+Push a `v*` tag to build a Linux release on the self-hosted runner. The release
+contains a `forge-bot-<tag>-linux-<architecture>.tar.gz` archive and a
+`SHA256SUMS` file.
+
 ## Quick start
 
 ```bash

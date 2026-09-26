@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --locked --release
+      - name: Package
+        env:
+          TAG: ${{ forge.ref_name }}
+        run: |
+          set -eu
+          mkdir -p dist/release
+          archive="forge-bot-${TAG}-linux-$(uname -m).tar.gz"
+          tar -czf "dist/release/${archive}" -C target/release forge-bot
+          (cd dist/release && sha256sum "${archive}" > SHA256SUMS)
+      - name: Publish release
+        uses: actions/forgejo-release@v2.9.1
+        with:
+          direction: upload
+          release-dir: dist/release
