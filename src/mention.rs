@@ -44,24 +44,19 @@ pub fn extract_mention(body: &str, trigger: &str) -> Option<Mention> {
         return None;
     }
 
-    let lower_body = body.to_lowercase();
-    let lower_trigger = trigger.to_lowercase();
+    let lower_trigger: String = trigger.chars().flat_map(char::to_lowercase).collect();
 
-    let mut search_from = 0;
-    while let Some(rel) = lower_body[search_from..].find(&lower_trigger) {
-        let idx = search_from + rel;
-        let before_ok = idx == 0
-            || !body[..idx]
-                .chars()
-                .next_back()
-                .map(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                .unwrap_or(false);
-        if !before_ok {
-            search_from = idx + lower_trigger.len();
+    let mut before_ok = true;
+    for (idx, ch) in body.char_indices() {
+        let can_start = before_ok;
+        before_ok = !(ch.is_alphanumeric() || ch == '_' || ch == '-');
+        if !can_start {
             continue;
         }
-
-        let after = &body[idx + trigger.len()..];
+        let Some(len) = matching_prefix_len(&body[idx..], &lower_trigger) else {
+            continue;
+        };
+        let after = &body[idx + len..];
 
         // Optional `:agent` selector directly after the trigger.
         let (agent, rest) = match after.strip_prefix(':') {
@@ -94,6 +89,24 @@ pub fn extract_mention(body: &str, trigger: &str) -> Option<Mention> {
     None
 }
 
+/// Match lowercase characters while retaining byte boundaries in the original
+/// text. Unicode lowercasing can change both byte length and character count.
+fn matching_prefix_len(body: &str, lower_trigger: &str) -> Option<usize> {
+    let mut expected = lower_trigger.chars();
+    for (idx, ch) in body.char_indices() {
+        for lower in ch.to_lowercase() {
+            if expected.next() != Some(lower) {
+                return None;
+            }
+        }
+        // Only accept a match after consuming a complete original character.
+        if expected.as_str().is_empty() {
+            return Some(idx + ch.len_utf8());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +129,40 @@ mod tests {
     fn is_case_insensitive() {
         let m = extract_mention("Hey @Agent please review", "@agent").unwrap();
         assert_eq!(m.message, "please review");
+    }
+
+    #[test]
+    fn preserves_offsets_after_unicode_lowercase_expansion() {
+        let m = extract_mention("İİ @agent fix it", "@agent").unwrap();
+        assert_eq!(m.message, "fix it");
+    }
+
+    #[test]
+    fn keeps_unicode_message_at_a_character_boundary() {
+        let m = extract_mention("İ @agent中文", "@agent").unwrap();
+        assert_eq!(m.message, "中文");
+    }
+
+    #[test]
+    fn matches_unicode_trigger_with_different_byte_lengths() {
+        let m = extract_mention("@ⱥgent:codex fix it", "@Ⱥgent").unwrap();
+        assert_eq!(m.agent.as_deref(), Some("codex"));
+        assert_eq!(m.message, "fix it");
+    }
+
+    #[test]
+    fn checks_original_boundary_after_unicode_lowercase_expansion() {
+        let m = extract_mention("İ@agent ignore this; @agent do this", "@agent").unwrap();
+        assert_eq!(m.message, "do this");
+    }
+
+    #[test]
+    fn matches_complete_unicode_lowercase_expansions() {
+        let m = extract_mention("@İ:codex fix it", "@i\u{307}").unwrap();
+        assert_eq!(m.agent.as_deref(), Some("codex"));
+        assert_eq!(m.message, "fix it");
+
+        assert!(extract_mention("@İ fix it", "@i").is_none());
     }
 
     #[test]
