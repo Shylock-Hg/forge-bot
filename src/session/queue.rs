@@ -248,11 +248,11 @@ impl Inner {
         // The acknowledgement and every fallback notice share one status
         // comment. When `submit` tracked the acknowledgement we edit it in
         // place; otherwise the notices are buffered here and posted once when
-        // the calling sequence settles (issue #77).
-        let mut status: Vec<String> = Vec::new();
-        if self.config.reply.ack {
-            status.push(format!("🤖 On it — running agent **{}**.", job.agent));
-        }
+        // the calling sequence settles (issue #77). The headline names the
+        // agent that actually runs, rewritten as the sequence falls back
+        // (issue #80).
+        let mut notices: Vec<String> = Vec::new();
+        let mut running_agent = job.agent.clone();
 
         if let Err(error) = self.sessions.begin(&job) {
             tracing::warn!(%error, "failed to persist session start");
@@ -263,7 +263,8 @@ impl Inner {
             Ok(workspace) => workspace,
             Err(error) => {
                 if job.status_comment.is_none() {
-                    self.flush_status(&job.message, &mut status).await;
+                    self.flush_status(&job.message, &running_agent, &mut notices)
+                        .await;
                 }
                 self.finish(
                     &key,
@@ -279,7 +280,8 @@ impl Inner {
         // Resolve eagerly so an unknown agent fails before we run anything.
         if let Err(error) = self.agents.get(&job.agent) {
             if job.status_comment.is_none() {
-                self.flush_status(&job.message, &mut status).await;
+                self.flush_status(&job.message, &running_agent, &mut notices)
+                    .await;
             }
             self.finish(
                 &key,
@@ -313,7 +315,8 @@ impl Inner {
         let candidates = self.candidate_agents(&job.agent);
         if candidates.is_empty() {
             if job.status_comment.is_none() {
-                self.flush_status(&job.message, &mut status).await;
+                self.flush_status(&job.message, &running_agent, &mut notices)
+                    .await;
             }
             self.finish_no_agent(&key, &job).await;
             return;
@@ -329,6 +332,7 @@ impl Inner {
 
         for (index, name) in candidates.iter().enumerate() {
             used_agent = name.clone();
+            running_agent = name.clone();
 
             // Buffer the notice for this step so the whole calling sequence
             // shares one comment. Every agent skipped because it is at capacity
@@ -380,11 +384,13 @@ impl Inner {
                     })
                 };
                 if let Some(notice) = notice {
-                    status.push(notice);
+                    notices.push(notice);
                     // When the acknowledgement is a tracked comment, edit it
-                    // instead of posting another one.
+                    // instead of posting another one. `running_agent` is the
+                    // candidate about to run, so the headline names it.
                     if let Some(id) = &job.status_comment {
-                        self.sync_status(&job.message, id, &status).await;
+                        self.sync_status(&job.message, id, &running_agent, &notices)
+                            .await;
                     }
                 }
             }
@@ -446,7 +452,8 @@ impl Inner {
         // Post the buffered acknowledgement and fallback notices together when
         // the forge could not track the comment for in-place edits.
         if job.status_comment.is_none() {
-            self.flush_status(&job.message, &mut status).await;
+            self.flush_status(&job.message, &running_agent, &mut notices)
+                .await;
         }
 
         let Some(outcome) = last_outcome else {
@@ -515,9 +522,16 @@ impl Inner {
         skipped
     }
 
-    /// Append the buffered status to the tracked status comment in place.
-    async fn sync_status(&self, message: &ForgeMessage, comment_id: &str, status: &[String]) {
-        let body = format!("forge-bot: {}", status.join(" "));
+    /// Append the buffered notices to the tracked status comment in place,
+    /// rewriting the headline to name the agent that actually runs.
+    async fn sync_status(
+        &self,
+        message: &ForgeMessage,
+        comment_id: &str,
+        agent: &str,
+        notices: &[String],
+    ) {
+        let body = format!("forge-bot: {}", status_body(agent, notices));
         if let Err(error) = self.api.update_reply(message, comment_id, &body).await {
             tracing::warn!(
                 location = %message.location,
@@ -531,15 +545,15 @@ impl Inner {
     ///
     /// Used when the forge cannot track the acknowledgement for in-place
     /// edits: the acknowledgement and the per-step fallback notices collected
-    /// in `status` are joined so a fallback is one comment instead of one per
+    /// in `notices` are joined so a fallback is one comment instead of one per
     /// step (issue #77). The buffer is cleared so later callers (for example
     /// the result reply) do not repeat it.
-    async fn flush_status(&self, message: &ForgeMessage, status: &mut Vec<String>) {
-        if status.is_empty() {
+    async fn flush_status(&self, message: &ForgeMessage, agent: &str, notices: &mut Vec<String>) {
+        if !self.config.reply.ack && notices.is_empty() {
             return;
         }
-        let body = status.join(" ");
-        status.clear();
+        let body = status_body(agent, notices);
+        notices.clear();
         self.reply(message, &body).await;
     }
 
@@ -652,6 +666,15 @@ fn permission_aware_failure(job: &Job, error: &BotError) -> AgentOutcome {
     } else {
         AgentOutcome::failure(error.to_string(), Default::default())
     }
+}
+
+/// Render the shared status comment: the "on it" headline naming the agent
+/// that runs, followed by every fallback notice collected so far.
+fn status_body(agent: &str, notices: &[String]) -> String {
+    let mut parts = Vec::with_capacity(notices.len() + 1);
+    parts.push(format!("🤖 On it — running agent **{agent}**."));
+    parts.extend(notices.iter().cloned());
+    parts.join(" ")
 }
 
 /// Render agent names for a fallback notice, e.g. `**codex**, **agy**`.
@@ -1712,6 +1735,16 @@ mod tests {
         assert!(status.contains("capacity-agent"), "{status}");
         assert!(status.contains("broken-agent"), "{status}");
         assert!(status.contains("switching to **good-agent**"), "{status}");
+        // Issue #80: the headline must name the agent that actually runs, not
+        // the requested agent that was skipped.
+        assert!(
+            status.contains("running agent **good-agent**"),
+            "the headline must name the final agent: {status}"
+        );
+        assert!(
+            !status.contains("running agent **capacity-agent**"),
+            "the headline must not name the skipped agent: {status}"
+        );
     }
 
     /// With a forge that supports editing, the acknowledgement is posted on
@@ -1761,6 +1794,16 @@ mod tests {
         assert!(status.contains("capacity-agent"), "{status}");
         assert!(status.contains("broken-agent"), "{status}");
         assert!(status.contains("switching to **good-agent**"), "{status}");
+        // Issue #80: the tracked comment is edited as the sequence falls back,
+        // so its headline also names the final agent.
+        assert!(
+            status.contains("running agent **good-agent**"),
+            "the headline must name the final agent: {status}"
+        );
+        assert!(
+            !status.contains("running agent **capacity-agent**"),
+            "the headline must not name the skipped agent: {status}"
+        );
     }
 
     /// The tracked acknowledgement is posted by `submit`, before the worker
