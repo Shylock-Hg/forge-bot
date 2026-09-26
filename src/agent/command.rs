@@ -483,10 +483,10 @@ mod tests {
             ..Default::default()
         };
 
-        // A normal conversation mention keeps the existing instructions.
+        // A pull-request conversation mention does not request another review.
         let conversation = build_prompt(&request, &context);
         assert!(!conversation.contains("inline pull-request review comment"));
-        assert!(conversation.contains("request a review from the caller (@alice)"));
+        assert!(!conversation.contains("request a review from the caller"));
 
         context.reply_target = ReplyTarget::ReviewComment(crate::forge::ReviewCommentTarget {
             review_id: 103,

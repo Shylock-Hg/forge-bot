@@ -62,6 +62,11 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
+    /// Whether the triggering mention came from an issue rather than a pull request.
+    pub fn is_issue(&self) -> bool {
+        !self.is_pull_request
+    }
+
     /// Variables exported to the agent process.
     pub fn environment(&self, request: &AgentRequest) -> Vec<(String, String)> {
         let mut env = vec![

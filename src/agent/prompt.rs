@@ -26,7 +26,7 @@ pub(super) fn build_prompt(request: &AgentRequest, context: &AgentContext) -> St
     prompt.push_str(request.message.trim());
     prompt.push('\n');
 
-    if !context.requester.is_empty() {
+    if context.is_issue() && !context.requester.is_empty() {
         prompt.push_str(&format!(
             "\nIf you create a pull request, request a review from the caller (@{}) on that pull request.\n",
             context.requester
@@ -71,6 +71,7 @@ mod tests {
                 title: Some("A title".into()),
                 workspace: "/tmp/ws".into(),
                 requester: "alice".into(),
+                is_pull_request: true,
                 reply_target: ReplyTarget::ReviewComment(ReviewCommentTarget {
                     review_id: 7,
                     path: "src/lib.rs".into(),
@@ -95,7 +96,6 @@ mod tests {
                 "Title: A title\n",
                 "Your working directory: /tmp/ws\n\n",
                 "Requested work:\nfix this\n",
-                "\nIf you create a pull request, request a review from the caller (@alice) on that pull request.\n",
                 "\nThis mention is an inline pull-request review comment. Post any reply in the same review thread (review id 7, file `src/lib.rs`, line 42) instead of opening a new top-level comment.\n",
                 "\nUse the tools available to you (forge CLI/API, git, shell, filesystem) to gather context, make changes, run tests, and commit/push when appropriate. Reply on the forge when you are done. Forge credentials are available in the environment.\n",
             )
@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_prompt_omits_review_thread_guidance() {
+    fn pull_request_conversation_omits_review_request_and_thread_guidance() {
         let request = AgentRequest {
             location: "https://forge.example/o/r/pulls/4".parse().unwrap(),
             message: "fix this".into(),
@@ -111,14 +111,35 @@ mod tests {
         let context = AgentContext {
             repository: "o/r".into(),
             requester: "alice".into(),
+            is_pull_request: true,
             ..Default::default()
         };
 
         let prompt = build_prompt(&request, &context);
         assert!(prompt.contains("Repository: o/r"));
         assert!(prompt.contains("fix this"));
-        assert!(prompt.contains("request a review from the caller (@alice)"));
+        assert!(!prompt.contains("request a review from the caller"));
         assert!(prompt.contains("Reply on the forge"));
         assert!(!prompt.contains("inline pull-request review comment"));
+    }
+
+    #[test]
+    fn issue_mention_requests_review_from_caller() {
+        let request = AgentRequest {
+            location: "https://forge.example/o/r/issues/4#issuecomment-9"
+                .parse()
+                .unwrap(),
+            message: "fix this".into(),
+        };
+        let context = AgentContext {
+            repository: "o/r".into(),
+            requester: "alice".into(),
+            is_pull_request: false,
+            ..Default::default()
+        };
+
+        assert!(
+            build_prompt(&request, &context).contains("request a review from the caller (@alice)")
+        );
     }
 }
