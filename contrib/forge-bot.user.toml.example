@@ -6,7 +6,7 @@
 bind = "127.0.0.1:8080"
 mention = "@agent"
 # Agent call order, matching config.example.toml.
-agent_sequence = ["codex", "pi-rpc", "agy", "claude"]
+agent_sequence = ["codex", "agy", "pi-rpc", "claude"]
 
 [forgejo]
 base_url = "http://127.0.0.1:3000"
@@ -27,7 +27,8 @@ git_author_email = "forge-bot@localhost"
 
 [reply]
 # Post "on it" as soon as the mention is accepted, so a busy or slow agent
-# does not leave the thread unanswered.
+# does not leave the thread unanswered. Capacity fallbacks append to that same
+# comment instead of posting one comment per step.
 ack = true
 result = true
 

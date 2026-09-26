@@ -205,6 +205,14 @@ impl AgentRegistry {
         names
     }
 
+    /// All registered agent names in the actual preference order the fallback
+    /// uses: the configured `agent_sequence` when set, otherwise the built-in
+    /// order. Unlike [`Self::names`], this reflects `agent_sequence`, so callers
+    /// can tell which agents were passed over between two candidates.
+    pub fn ordered_names(&self) -> Vec<String> {
+        self.sequence.clone()
+    }
+
     /// Mark an agent unavailable until `cooldown` has elapsed.
     pub fn mark_unavailable(&self, name: &str, cooldown: Duration) {
         let until = Instant::now() + cooldown;
@@ -362,6 +370,22 @@ mod tests {
 
         registry.mark_unavailable("pi-rpc", Duration::from_secs(60));
         assert_eq!(registry.available_names(), ["claude"]);
+    }
+
+    #[test]
+    fn ordered_names_reflects_the_configured_sequence() {
+        // Built-in order when no sequence is configured.
+        let registry = AgentRegistry::from_config(&Config::default());
+        assert_eq!(&registry.ordered_names()[..3], ["codex", "agy", "pi-rpc"]);
+
+        // The configured sequence, including agents that are unavailable.
+        let config = Config {
+            agent_sequence: vec!["pi-rpc".into(), "claude".into()],
+            ..Default::default()
+        };
+        let registry = AgentRegistry::from_config(&config);
+        registry.mark_unavailable("claude", Duration::from_secs(60));
+        assert_eq!(registry.ordered_names(), ["pi-rpc", "claude"]);
     }
 
     #[test]

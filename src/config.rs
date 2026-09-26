@@ -344,7 +344,8 @@ impl WorkspaceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplyConfig {
-    /// Post a short acknowledgement when a job starts.
+    /// Post a short acknowledgement when a job starts, edited in place as
+    /// fallbacks occur so a job keeps one status comment.
     pub ack: bool,
     /// Post a result comment when a job finishes. Disabled by default because
     /// agents normally reply themselves; enable it when they do not.

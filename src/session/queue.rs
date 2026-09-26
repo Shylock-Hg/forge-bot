@@ -96,13 +96,23 @@ impl Dispatcher {
         // Resolve eagerly so an unknown agent fails before we persist a job.
         let _ = self.inner.agents.get(agent_name)?;
 
-        let job = Job {
+        let mut job = Job {
             id: Uuid::new_v4(),
             message,
             mention,
             agent: agent_name.to_owned(),
             created_at: Utc::now(),
+            status_comment: None,
         };
+
+        // Acknowledge as soon as the job is accepted. When the forge can edit
+        // the comment, remember its id so each fallback notice can be appended
+        // to the same comment (issue #77). Otherwise the worker buffers the
+        // notices and posts them together.
+        if self.inner.config.reply.ack {
+            let ack = format!("🤖 On it — running agent **{}**.", job.agent);
+            job.status_comment = self.inner.reply_tracked(&job.message, &ack).await;
+        }
 
         self.inner.sessions.save_job(&job)?;
         self.inner
@@ -110,17 +120,6 @@ impl Dispatcher {
             .send(job.clone())
             .await
             .map_err(|_| BotError::Other(anyhow::anyhow!("job queue is closed")))?;
-
-        // Acknowledge as soon as the job is accepted, before any worker or
-        // agent capacity comes into play. Without this a mention in a busy
-        // thread can go unanswered until the running agent settles.
-        if self.inner.config.reply.ack {
-            let ack = format!(
-                "🤖 On it — running agent **{}**. I'll report back here when it finishes.",
-                job.agent
-            );
-            self.inner.reply(&job.message, &ack).await;
-        }
 
         tracing::info!(job = %job.id, agent = %job.agent, repo = %job.message.repository, "job queued");
         Ok(job.id)
@@ -246,6 +245,15 @@ impl Inner {
     async fn handle(&self, job: Job) {
         let key = job.session_key();
 
+        // The acknowledgement and every fallback notice share one status
+        // comment. When `submit` tracked the acknowledgement we edit it in
+        // place; otherwise the notices are buffered here and posted once when
+        // the calling sequence settles (issue #77).
+        let mut status: Vec<String> = Vec::new();
+        if self.config.reply.ack {
+            status.push(format!("🤖 On it — running agent **{}**.", job.agent));
+        }
+
         if let Err(error) = self.sessions.begin(&job) {
             tracing::warn!(%error, "failed to persist session start");
         }
@@ -254,6 +262,9 @@ impl Inner {
         let workspace = match self.workspaces.prepare(&job.message, &credentials).await {
             Ok(workspace) => workspace,
             Err(error) => {
+                if job.status_comment.is_none() {
+                    self.flush_status(&job.message, &mut status).await;
+                }
                 self.finish(
                     &key,
                     &job,
@@ -267,6 +278,9 @@ impl Inner {
 
         // Resolve eagerly so an unknown agent fails before we run anything.
         if let Err(error) = self.agents.get(&job.agent) {
+            if job.status_comment.is_none() {
+                self.flush_status(&job.message, &mut status).await;
+            }
             self.finish(
                 &key,
                 &job,
@@ -298,6 +312,9 @@ impl Inner {
         // known to be at capacity are skipped entirely.
         let candidates = self.candidate_agents(&job.agent);
         if candidates.is_empty() {
+            if job.status_comment.is_none() {
+                self.flush_status(&job.message, &mut status).await;
+            }
             self.finish_no_agent(&key, &job).await;
             return;
         }
@@ -313,27 +330,63 @@ impl Inner {
         for (index, name) in candidates.iter().enumerate() {
             used_agent = name.clone();
 
-            // The initial "on it" acknowledgement is posted by `submit` as
-            // soon as the mention is accepted, so only announce deviations
-            // from the requested agent here.
-            if index == 0 {
-                if self.config.reply.ack && name != &job.agent {
-                    let notice = format!(
-                        "⚠️ Agent **{}** is at capacity; running agent **{name}** instead.",
-                        job.agent
-                    );
-                    self.reply(&job.message, &notice).await;
-                }
-            } else if self.config.reply.ack {
-                let previous = &candidates[index - 1];
-                let notice = if previous_was_capacity {
-                    format!(
-                        "⚠️ Agent **{previous}** hit a capacity limit; switching to **{name}**."
-                    )
+            // Buffer the notice for this step so the whole calling sequence
+            // shares one comment. Every agent skipped because it is at capacity
+            // is named, so an intermediate fallback (for example `agy`) is
+            // never silently passed over.
+            if self.config.reply.ack {
+                let notice = if index == 0 {
+                    if name == &job.agent {
+                        None
+                    } else {
+                        let skipped = self.skipped_agents(&job.agent, name);
+                        Some(match skipped.as_slice() {
+                            [] => format!("⚠️ Running agent **{name}** instead."),
+                            [only] => format!(
+                                "⚠️ Agent **{only}** is at capacity; running agent **{name}** instead."
+                            ),
+                            many => format!(
+                                "⚠️ Agents {} are at capacity; running agent **{name}** instead.",
+                                agent_list(many)
+                            ),
+                        })
+                    }
                 } else {
-                    format!("⚠️ Agent **{previous}** failed; switching to **{name}**.")
+                    let previous = &candidates[index - 1];
+                    let skipped = self.skipped_agents(previous, name);
+                    Some(if previous_was_capacity {
+                        // `skipped` starts with `previous`, because a capacity
+                        // hit marks it unavailable before the next candidate is
+                        // chosen.
+                        match skipped.as_slice() {
+                            [] | [_] => format!(
+                                "⚠️ Agent **{previous}** hit a capacity limit; switching to **{name}**."
+                            ),
+                            many => format!(
+                                "⚠️ Agents {} hit a capacity limit; switching to **{name}**.",
+                                agent_list(many)
+                            ),
+                        }
+                    } else if skipped.is_empty() {
+                        format!("⚠️ Agent **{previous}** failed; switching to **{name}**.")
+                    } else {
+                        format!(
+                            "⚠️ Agent **{previous}** failed; {} at capacity; switching to **{name}**.",
+                            match skipped.as_slice() {
+                                [only] => format!("agent **{only}** is"),
+                                many => format!("agents {} are", agent_list(many)),
+                            }
+                        )
+                    })
                 };
-                self.reply(&job.message, &notice).await;
+                if let Some(notice) = notice {
+                    status.push(notice);
+                    // When the acknowledgement is a tracked comment, edit it
+                    // instead of posting another one.
+                    if let Some(id) = &job.status_comment {
+                        self.sync_status(&job.message, id, &status).await;
+                    }
+                }
             }
 
             let agent = match self.agents.get(name) {
@@ -390,6 +443,12 @@ impl Inner {
             break;
         }
 
+        // Post the buffered acknowledgement and fallback notices together when
+        // the forge could not track the comment for in-place edits.
+        if job.status_comment.is_none() {
+            self.flush_status(&job.message, &mut status).await;
+        }
+
         let Some(outcome) = last_outcome else {
             self.finish_no_agent(&key, &job).await;
             return;
@@ -422,6 +481,66 @@ impl Inner {
             }
         }
         candidates
+    }
+
+    /// Agents passed over between two fallback steps because they are at
+    /// capacity.
+    ///
+    /// `from` is the agent being left (the requested agent before the first
+    /// candidate, otherwise the previously tried one) and `to` is the next
+    /// candidate that will run. The result follows the configured preference
+    /// order and includes `from` when it is unavailable, so a switch notice can
+    /// name every agent the fallback skipped instead of omitting one (for
+    /// example `agy`) and leaving the operator to guess why.
+    ///
+    /// Naming every skipped agent keeps each notice accurate; the notices are
+    /// collected and posted as a single status comment (issue #77).
+    fn skipped_agents(&self, from: &str, to: &str) -> Vec<String> {
+        let order = self.agents.ordered_names();
+        let mut skipped = Vec::new();
+        if !self.agents.is_available(from) {
+            skipped.push(from.to_owned());
+        }
+        if let (Some(start), Some(end)) = (
+            order.iter().position(|name| name == from),
+            order.iter().position(|name| name == to),
+        ) && end > start
+        {
+            for name in &order[start + 1..end] {
+                if !self.agents.is_available(name) {
+                    skipped.push(name.clone());
+                }
+            }
+        }
+        skipped
+    }
+
+    /// Append the buffered status to the tracked status comment in place.
+    async fn sync_status(&self, message: &ForgeMessage, comment_id: &str, status: &[String]) {
+        let body = format!("forge-bot: {}", status.join(" "));
+        if let Err(error) = self.api.update_reply(message, comment_id, &body).await {
+            tracing::warn!(
+                location = %message.location,
+                %error,
+                "failed to update the status comment"
+            );
+        }
+    }
+
+    /// Post the buffered status of a calling sequence as a single comment.
+    ///
+    /// Used when the forge cannot track the acknowledgement for in-place
+    /// edits: the acknowledgement and the per-step fallback notices collected
+    /// in `status` are joined so a fallback is one comment instead of one per
+    /// step (issue #77). The buffer is cleared so later callers (for example
+    /// the result reply) do not repeat it.
+    async fn flush_status(&self, message: &ForgeMessage, status: &mut Vec<String>) {
+        if status.is_empty() {
+            return;
+        }
+        let body = status.join(" ");
+        status.clear();
+        self.reply(message, &body).await;
     }
 
     async fn finish(&self, key: &str, job: &Job, agent: &str, outcome: &AgentOutcome) {
@@ -486,6 +605,26 @@ impl Inner {
             }
         }
     }
+
+    /// Post `body` and return the new comment id when the forge can edit it.
+    async fn reply_tracked(&self, message: &ForgeMessage, body: &str) -> Option<String> {
+        let reply = format!("forge-bot: {body}");
+        match self.api.reply_tracked(message, &reply).await {
+            Ok(id) => id,
+            Err(error) if error.is_permission_denied() => {
+                tracing::warn!(
+                    location = %message.location,
+                    %error,
+                    "cannot reply: the forge denied comment permission"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, location = %message.location, "failed to post comment");
+                None
+            }
+        }
+    }
 }
 
 /// Reply posted when every configured agent is at capacity.
@@ -513,6 +652,15 @@ fn permission_aware_failure(job: &Job, error: &BotError) -> AgentOutcome {
     } else {
         AgentOutcome::failure(error.to_string(), Default::default())
     }
+}
+
+/// Render agent names for a fallback notice, e.g. `**codex**, **agy**`.
+fn agent_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("**{name}**"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn truncate(input: &str, max: usize) -> String {
@@ -578,7 +726,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             config.clone(),
             Arc::new(AgentRegistry::from_config(&config)),
-            sessions,
+            sessions.clone(),
             api.clone(),
             Policy::new(&config.policy),
         )
@@ -595,6 +743,7 @@ mod tests {
             )
             .await
             .unwrap();
+        wait_for_drain(&sessions).await;
 
         let comments = api.comments();
         assert_eq!(comments.len(), 1, "exactly one acknowledgement");
@@ -803,6 +952,7 @@ mod tests {
             },
             agent: "pi-rpc".into(),
             created_at: Utc::now(),
+            status_comment: None,
         };
         let outcome = permission_aware_failure(
             &job,
@@ -857,6 +1007,49 @@ mod tests {
     impl ForgeApi for RecordingApi {
         async fn post_comment(&self, _location: &url::Url, body: &str) -> crate::error::Result<()> {
             self.comments.lock().unwrap().push(body.to_owned());
+            Ok(())
+        }
+    }
+
+    /// Forge API that supports editing the tracked status comment, so tests
+    /// can prove the acknowledgement is updated in place across fallbacks.
+    #[derive(Default)]
+    struct EditableApi {
+        comments: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl EditableApi {
+        fn comments(&self) -> Vec<String> {
+            self.comments.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeApi for EditableApi {
+        async fn post_comment(&self, _location: &url::Url, body: &str) -> crate::error::Result<()> {
+            self.comments.lock().unwrap().push(body.to_owned());
+            Ok(())
+        }
+
+        async fn reply_tracked(
+            &self,
+            _message: &ForgeMessage,
+            body: &str,
+        ) -> crate::error::Result<Option<String>> {
+            let mut comments = self.comments.lock().unwrap();
+            comments.push(body.to_owned());
+            Ok(Some((comments.len() - 1).to_string()))
+        }
+
+        async fn update_reply(
+            &self,
+            _message: &ForgeMessage,
+            comment_id: &str,
+            body: &str,
+        ) -> crate::error::Result<()> {
+            let index: usize = comment_id.parse().expect("comment id");
+            let mut comments = self.comments.lock().unwrap();
+            comments[index] = body.to_owned();
             Ok(())
         }
     }
@@ -928,6 +1121,15 @@ mod tests {
         // A shell that echoes its stdin, standing in for a healthy agent.
         config.agents.overrides.insert(
             "good-agent".into(),
+            crate::config::AgentConfig {
+                command: Some("cat".into()),
+                ..Default::default()
+            },
+        );
+        // Sorts between `capacity-agent` and `good-agent`, so tests can assert
+        // that an intermediate agent skipped for capacity is named.
+        config.agents.overrides.insert(
+            "flag-agent".into(),
             crate::config::AgentConfig {
                 command: Some("cat".into()),
                 ..Default::default()
@@ -1356,6 +1558,261 @@ mod tests {
         );
     }
 
+    /// Regression test for issue #78: when several fallback agents are at
+    /// capacity, the notice must name every one it skips. `flag-agent` sorts
+    /// between `capacity-agent` and `good-agent`, mirroring `agy` sitting
+    /// between `codex` and `pi-rpc`, and must not be silently dropped.
+    #[tokio::test]
+    async fn capacity_notice_names_every_skipped_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = capacity_config(dir.path());
+        config.reply.ack = true;
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["capacity-agent", "flag-agent", "good-agent"]);
+        // The requested agent and the intermediate fallback are both out.
+        registry.mark_unavailable("capacity-agent", Duration::from_secs(3600));
+        registry.mark_unavailable("flag-agent", Duration::from_secs(3600));
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry.clone(),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("capacity-agent".into()),
+                    message: "go".into(),
+                },
+                "capacity-agent",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let session = sessions.get(&SessionStore::key(&message("o/r"))).unwrap();
+        assert_eq!(session.runs[0].agent, "good-agent");
+
+        let comments = api.comments();
+        assert!(
+            comments.iter().any(|c| {
+                c.contains("capacity-agent")
+                    && c.contains("flag-agent")
+                    && c.contains("good-agent")
+                    && c.contains("instead")
+            }),
+            "the notice must name every skipped agent, including the middle one: {comments:?}"
+        );
+    }
+
+    /// The same guarantee on a later fallback step: after the running agent
+    /// hits capacity, a capacity-limited agent between it and the next healthy
+    /// one is still named.
+    #[tokio::test]
+    async fn capacity_notice_names_skipped_agent_after_a_capacity_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = capacity_config(dir.path());
+        config.reply.ack = true;
+        let config = Arc::new(config);
+        let registry = isolated_registry(&config, &["capacity-agent", "flag-agent", "good-agent"]);
+        registry.mark_unavailable("flag-agent", Duration::from_secs(3600));
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry.clone(),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("capacity-agent".into()),
+                    message: "go".into(),
+                },
+                "capacity-agent",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let session = sessions.get(&SessionStore::key(&message("o/r"))).unwrap();
+        assert_eq!(session.runs[0].agent, "good-agent");
+
+        let comments = api.comments();
+        assert!(
+            comments.iter().any(|c| {
+                c.contains("capacity-agent")
+                    && c.contains("flag-agent")
+                    && c.contains("switching to **good-agent**")
+            }),
+            "the switch notice must name the skipped agent: {comments:?}"
+        );
+    }
+
+    /// Regression test for issue #77: the acknowledgement and every fallback
+    /// notice are merged into a single status comment instead of one comment
+    /// per step.
+    #[tokio::test]
+    async fn fallback_notices_are_merged_into_one_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = capacity_config(dir.path());
+        config.reply.ack = true;
+        let config = Arc::new(config);
+        let registry =
+            isolated_registry(&config, &["capacity-agent", "broken-agent", "good-agent"]);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(RecordingApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry.clone(),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("capacity-agent".into()),
+                    message: "go".into(),
+                },
+                "capacity-agent",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let session = sessions.get(&SessionStore::key(&message("o/r"))).unwrap();
+        assert_eq!(session.runs[0].agent, "good-agent");
+
+        let comments = api.comments();
+        assert_eq!(
+            comments.len(),
+            1,
+            "the calling sequence must be one comment: {comments:?}"
+        );
+        let status = &comments[0];
+        assert!(status.starts_with("forge-bot: 🤖 On it"), "{status}");
+        assert!(status.contains("capacity-agent"), "{status}");
+        assert!(status.contains("broken-agent"), "{status}");
+        assert!(status.contains("switching to **good-agent**"), "{status}");
+    }
+
+    /// With a forge that supports editing, the acknowledgement is posted on
+    /// accept and every fallback notice is appended to that same comment, so
+    /// the thread still gets one status comment (issue #77).
+    #[tokio::test]
+    async fn tracked_status_comment_is_edited_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = capacity_config(dir.path());
+        config.reply.ack = true;
+        let config = Arc::new(config);
+        let registry =
+            isolated_registry(&config, &["capacity-agent", "broken-agent", "good-agent"]);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(EditableApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            registry.clone(),
+            sessions.clone(),
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("capacity-agent".into()),
+                    message: "go".into(),
+                },
+                "capacity-agent",
+            )
+            .await
+            .unwrap();
+
+        wait_for_drain(&sessions).await;
+
+        let comments = api.comments();
+        assert_eq!(
+            comments.len(),
+            1,
+            "the tracked acknowledgement must be edited, not duplicated: {comments:?}"
+        );
+        let status = &comments[0];
+        assert!(status.starts_with("forge-bot: 🤖 On it"), "{status}");
+        assert!(status.contains("capacity-agent"), "{status}");
+        assert!(status.contains("broken-agent"), "{status}");
+        assert!(status.contains("switching to **good-agent**"), "{status}");
+    }
+
+    /// The tracked acknowledgement is posted by `submit`, before the worker
+    /// runs, so a busy or slow agent still does not leave the thread silent.
+    #[tokio::test]
+    async fn tracked_acknowledgement_is_posted_on_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.reply.ack = true;
+        config.policy.allow_all = true;
+        config.agents.overrides.insert(
+            "custom".into(),
+            crate::config::AgentConfig {
+                command: Some("cat".into()),
+                ..Default::default()
+            },
+        );
+        let config = Arc::new(config);
+        let sessions = Arc::new(SessionStore::open(dir.path()).unwrap());
+        let api = Arc::new(EditableApi::default());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            Arc::new(AgentRegistry::from_config(&config)),
+            sessions,
+            api.clone(),
+            Policy::new(&config.policy),
+        )
+        .unwrap();
+
+        dispatcher
+            .submit(
+                message("o/r"),
+                Mention {
+                    agent: Some("custom".into()),
+                    message: "go".into(),
+                },
+                "custom",
+            )
+            .await
+            .unwrap();
+
+        // `submit` awaits the tracked post, so the acknowledgement is visible
+        // without waiting for the worker.
+        let comments = api.comments();
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert!(
+            comments[0].starts_with("forge-bot: 🤖 On it"),
+            "{}",
+            comments[0]
+        );
+    }
+
     // --- conversation scheduling ------------------------------------------
 
     /// Message for a specific issue number, so tests can address distinct
@@ -1625,6 +2082,7 @@ echo "end:$token" >> "$AGENT_LOG"
                 },
                 agent: "gate".into(),
                 created_at: Utc::now() + chrono::Duration::seconds(index as i64),
+                status_comment: None,
             };
             job.message.comment_id = Some(index as i64);
             sessions.save_job(&job).unwrap();

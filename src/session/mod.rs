@@ -30,6 +30,12 @@ pub struct Job {
     /// Resolved agent name.
     pub agent: String,
     pub created_at: DateTime<Utc>,
+    /// Forge comment id of the status comment, when the forge supports editing
+    /// it. `submit` posts the acknowledgement and records the id so the worker
+    /// can append each fallback notice to the same comment instead of posting a
+    /// new one per step (issue #77).
+    #[serde(default)]
+    pub status_comment: Option<String>,
 }
 
 impl Job {

@@ -28,6 +28,29 @@ pub trait ForgeApi: Send + Sync {
     async fn reply(&self, message: &ForgeMessage, body: &str) -> Result<()> {
         self.post_comment(&message.location, body).await
     }
+
+    /// Post `body` as a reply and return the new comment's id when the forge
+    /// supports editing it later.
+    ///
+    /// The default does nothing and returns `None`: a caller that cannot track
+    /// the comment buffers its notices and posts them together instead.
+    async fn reply_tracked(&self, message: &ForgeMessage, body: &str) -> Result<Option<String>> {
+        let _ = (message, body);
+        Ok(None)
+    }
+
+    /// Replace the body of the comment `comment_id` previously returned by
+    /// [`Self::reply_tracked`]. The default posts `body` as a new reply so a
+    /// forge without edit support still delivers the update.
+    async fn update_reply(
+        &self,
+        message: &ForgeMessage,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<()> {
+        let _ = comment_id;
+        self.reply(message, body).await
+    }
 }
 
 /// A [`ForgeApi`] that posts over HTTP to the supported forges.
@@ -45,6 +68,74 @@ impl HttpForgeApi {
         Ok(Self { client, config })
     }
 
+    /// Replace the body of a Forgejo issue comment.
+    async fn update_forgejo(
+        &self,
+        loc: &ForgeLocation,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<()> {
+        let cfg = self
+            .config
+            .forges
+            .forgejo
+            .as_ref()
+            .ok_or_else(|| BotError::ForgeApi("forgejo is not configured".into()))?;
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/comments/{}",
+            cfg.base_url.trim_end_matches('/'),
+            loc.owner,
+            loc.repo,
+            comment_id
+        );
+        let mut req = self
+            .client
+            .patch(&url)
+            .json(&serde_json::json!({ "body": body }));
+        if let Some(token) = &cfg.token {
+            req = req.header("Authorization", format!("token {token}"));
+        }
+        send(req).await
+    }
+
+    /// Post `body` as a Forgejo issue comment and return its id.
+    async fn tracked_forgejo(&self, loc: &ForgeLocation, body: &str) -> Result<Option<String>> {
+        let cfg = self
+            .config
+            .forges
+            .forgejo
+            .as_ref()
+            .ok_or_else(|| BotError::ForgeApi("forgejo is not configured".into()))?;
+        let number = loc
+            .number
+            .ok_or_else(|| BotError::ForgeApi("location has no issue number".into()))?;
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{}/comments",
+            cfg.base_url.trim_end_matches('/'),
+            loc.owner,
+            loc.repo,
+            number
+        );
+        let mut req = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({ "body": body }));
+        if let Some(token) = &cfg.token {
+            req = req.header("Authorization", format!("token {token}"));
+        }
+        let response = req.send().await?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(forge_error(status, &text));
+        }
+        Ok(serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|comment| comment.get("id").and_then(serde_json::Value::as_i64))
+            .map(|id| id.to_string()))
+    }
+
+    /// Post `body` as a Forgejo issue comment.
     async fn post_forgejo(&self, loc: &ForgeLocation, body: &str) -> Result<()> {
         let cfg = self
             .config
@@ -198,6 +289,34 @@ impl ForgeApi for HttpForgeApi {
         }
         self.post_comment(&message.location, body).await
     }
+
+    async fn reply_tracked(&self, message: &ForgeMessage, body: &str) -> Result<Option<String>> {
+        // Inline review comments use a different edit endpoint, so leave them
+        // to the buffered single-comment fallback.
+        if matches!(&message.reply_target, ReplyTarget::ReviewComment(_)) {
+            return Ok(None);
+        }
+        let loc = ForgeLocation::parse(&message.location)?;
+        match loc.forge {
+            ForgeKind::Forgejo | ForgeKind::Gitea => self.tracked_forgejo(&loc, body).await,
+            _ => Ok(None),
+        }
+    }
+
+    async fn update_reply(
+        &self,
+        message: &ForgeMessage,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<()> {
+        let loc = ForgeLocation::parse(&message.location)?;
+        match loc.forge {
+            ForgeKind::Forgejo | ForgeKind::Gitea => {
+                self.update_forgejo(&loc, comment_id, body).await
+            }
+            _ => self.reply(message, body).await,
+        }
+    }
 }
 
 async fn send(request: reqwest::RequestBuilder) -> Result<()> {
@@ -207,14 +326,20 @@ async fn send(request: reqwest::RequestBuilder) -> Result<()> {
         return Ok(());
     }
     let text = response.text().await.unwrap_or_default();
-    let detail = format!("forge returned {status}: {}", text.trim());
+    Err(forge_error(status, &text))
+}
+
+/// Turn a non-success forge response into a [`BotError`].
+fn forge_error(status: reqwest::StatusCode, body: &str) -> BotError {
+    let detail = format!("forge returned {status}: {}", body.trim());
     if matches!(
         status,
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
     ) {
-        return Err(BotError::ForgePermissionDenied(detail));
+        BotError::ForgePermissionDenied(detail)
+    } else {
+        BotError::ForgeApi(detail)
     }
-    Err(BotError::ForgeApi(detail))
 }
 
 /// A [`ForgeApi`] that drops comments, useful for tests and dry runs.
@@ -582,6 +707,120 @@ mod tests {
         let location = Url::parse("http://forge.local/a/b/issues/7").unwrap();
         let error = api.post_comment(&location, "hi").await.unwrap_err();
         assert!(matches!(error, BotError::ForgePermissionDenied(_)));
+        assert!(server.await.unwrap().starts_with("POST "));
+    }
+    fn issue_message() -> ForgeMessage {
+        ForgeMessage {
+            forge: ForgeKind::Forgejo,
+            location: Url::parse("http://forge.local/a/b/issues/22#issuecomment-9039").unwrap(),
+            body: "@agent go".into(),
+            author: "shylock".into(),
+            repository: "a/b".into(),
+            comment_id: Some(9039),
+            number: Some(22),
+            is_pull_request: false,
+            linked_issue: None,
+            event: "issue_comment".into(),
+            title: None,
+            reply_target: ReplyTarget::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tracks_and_edits_forgejo_issue_comments() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response_body in ["{\"id\":42}", "{}"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 8192];
+                let read = socket.read(&mut buffer).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buffer[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+            requests
+        });
+
+        let config = config_with(
+            Some(ForgejoConfig {
+                base_url: format!("http://{addr}"),
+                token: Some("secret".into()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let api = HttpForgeApi::new(config).unwrap();
+
+        let id = api.reply_tracked(&issue_message(), "On it.").await.unwrap();
+        assert_eq!(id.as_deref(), Some("42"));
+
+        api.update_reply(&issue_message(), "42", "On it. Switching.")
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap();
+        assert!(
+            requests[0].starts_with("POST /api/v1/repos/a/b/issues/22/comments "),
+            "unexpected request: {}",
+            requests[0]
+        );
+        assert!(
+            requests[1].starts_with("PATCH /api/v1/repos/a/b/issues/comments/42 "),
+            "unexpected request: {}",
+            requests[1]
+        );
+        assert!(requests[1].contains("On it. Switching."));
+    }
+
+    #[tokio::test]
+    async fn review_comments_are_not_tracked_for_editing() {
+        let api = HttpForgeApi::new(config_with(
+            Some(ForgejoConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                token: None,
+                ..Default::default()
+            }),
+            None,
+            None,
+        ))
+        .unwrap();
+        // The review endpoint has no matching edit endpoint here, so the
+        // acknowledgement is left to the buffered single-comment fallback.
+        let id = api
+            .reply_tracked(&review_message(), "On it.")
+            .await
+            .unwrap();
+        assert_eq!(id, None);
+    }
+
+    #[tokio::test]
+    async fn tracked_post_surfaces_permission_errors() {
+        let (base, server) = one_shot(401).await;
+        let api = HttpForgeApi::new(config_with(
+            Some(ForgejoConfig {
+                base_url: base,
+                token: Some("secret".into()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        ))
+        .unwrap();
+        let err = api
+            .reply_tracked(&issue_message(), "On it.")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BotError::ForgePermissionDenied(_)));
         assert!(server.await.unwrap().starts_with("POST "));
     }
 }

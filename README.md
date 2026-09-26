@@ -176,7 +176,7 @@ most important options:
 | `[forgejo]` | `base_url`, `webhook_secret`, `token`, `bot_username`. |
 | `[policy]` | `allow_all`, `allowed_users`, `allowed_repos`. |
 | `[workspace]` | Whether to clone a checkout, and where. |
-| `[reply]` | `ack` defaults to true; `result` defaults to false because agents normally reply themselves. Set `result = true` if the gateway should post completion summaries. |
+| `[reply]` | `ack` defaults to true; the acknowledgement and any fallback notices share one status comment. `result` defaults to false because agents normally reply themselves; set `result = true` to also post completion summaries. |
 | `[session]` | Queue/state directory, worker count (the global cap on concurrent agent runs), recovery. |
 | `[capacity]` | Capacity/quota detection: `fallback`, `cooldown_secs` (default 5 h), extra `markers` (`[quota]` is an alias). |
 | `[agents.<name>]` | Per-agent `command`, `args`, `prompt`, `timeout_secs`, `env`. |
@@ -212,7 +212,7 @@ When a provider reaches capacity, the default fallback order is `codex` →
 `pi-rpc` when enabled. Authenticate `agy` interactively once before using it
 through the bot.
 
-The example config sets `agent_sequence = ["codex", "pi-rpc", "agy", "claude"]`
+The example config sets `agent_sequence = ["codex", "agy", "pi-rpc", "claude"]`
 at the top level. Use registered adapter names; `agy` is Antigravity
 and `claude` is Claude Code. An explicit `@agent:<name>` runs first even if it
 is absent from the sequence. Agents not listed are not tried as fallbacks.
