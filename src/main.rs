@@ -51,9 +51,8 @@ async fn main() -> anyhow::Result<()> {
 fn print_summary(config: &Config) {
     println!("bind:          {}", config.bind);
     println!("mention:       {}", config.mention);
-    println!("default agent: {}", config.default_agent);
-
     let agents = AgentRegistry::from_config(config);
+    println!("default agent: {}", agents.default_name());
     println!("agents:        {}", agents.names().join(", "));
 
     let forges = forge_bot::build_adapters(config);

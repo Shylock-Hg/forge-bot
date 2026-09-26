@@ -166,7 +166,7 @@ most important options:
 | --- | --- |
 | `bind` | Address the webhook server listens on. |
 | `mention` | Trigger string, default `@agent`. |
-| `default_agent` | Agent used when the mention does not pick one; defaults to `codex`. |
+| `agent_sequence` | Ordered agent names for unqualified mentions and capacity fallback. The first registered name becomes the default; only listed agents are fallback candidates. When omitted, the built-in order starts with `codex`. Explicit `@agent:<name>` still takes priority. |
 | `[forgejo]` | `base_url`, `webhook_secret`, `token`, `bot_username`. |
 | `[policy]` | `allow_all`, `allowed_users`, `allowed_repos`. |
 | `[workspace]` | Whether to clone a checkout, and where. |
@@ -205,6 +205,11 @@ When a provider reaches capacity, the default fallback order is `codex` →
 `agy` → `pi-rpc` → `claude` → `kimi`. The one-shot `pi` adapter joins after
 `pi-rpc` when enabled. Authenticate `agy` interactively once before using it
 through the bot.
+
+The example config sets `agent_sequence = ["codex", "pi-rpc", "agy", "claude"]`
+at the top level. Use registered adapter names; `agy` is Antigravity
+and `claude` is Claude Code. An explicit `@agent:<name>` runs first even if it
+is absent from the sequence. Agents not listed are not tried as fallbacks.
 
 The mention is matched case-insensitively and only at a word boundary, so
 `foo@agent.com` does not trigger it. Bot comments are ignored to avoid loops.

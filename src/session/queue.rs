@@ -130,6 +130,11 @@ impl Dispatcher {
     pub fn policy(&self) -> &Policy {
         &self.inner.policy
     }
+
+    /// The agent selected for mentions without an explicit adapter name.
+    pub fn default_agent_name(&self) -> &str {
+        self.inner.agents.default_name()
+    }
 }
 
 /// Receive jobs and run them with bounded concurrency.

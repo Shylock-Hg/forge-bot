@@ -265,7 +265,7 @@ impl Poller {
                 .agent
                 .clone()
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| self.config.default_agent.clone());
+                .unwrap_or_else(|| self.dispatcher.default_agent_name().to_owned());
 
             match self.dispatcher.submit(message, mention, &agent_name).await {
                 Ok(job_id) => tracing::info!(%job_id, repo, "accepted polled trigger"),

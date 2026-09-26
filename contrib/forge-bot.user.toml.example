@@ -5,8 +5,8 @@
 
 bind = "127.0.0.1:8080"
 mention = "@agent"
-# Codex is the first choice; switch to "pi-rpc" for the long-lived pool.
-default_agent = "codex"
+# Agent call order, matching config.example.toml.
+agent_sequence = ["codex", "pi-rpc", "agy", "claude"]
 
 [forgejo]
 base_url = "http://127.0.0.1:3000"

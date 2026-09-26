@@ -45,8 +45,9 @@ $EDITOR forge-bot.toml
 
 The important fields:
 
-* `mention`, `default_agent = "codex"` (codex is the first choice; the
-  `pi-rpc` pool is the default Pi fallback and persists its sessions. The
+* `mention`, `agent_sequence` (codex is the first choice by default; the
+  `pi-rpc` pool is the default Pi fallback and persists its sessions. Set
+  `agent_sequence = ["pi-rpc", "codex", "agy", "claude"]` to change the order. The
   one-shot `pi` adapter is disabled by default; enable it with
   `[agents.pi] enabled = true`);
 * `[forgejo]` `base_url`, `bot_username`;

@@ -49,6 +49,7 @@ fn harness(dir: &std::path::Path) -> Harness {
     config.reply.result = false;
     config.session.dir = dir.to_path_buf();
     config.session.workers = 1;
+    config.agent_sequence = vec!["custom".into()];
     config.forges.forgejo = Some(forge_bot::config::ForgejoConfig {
         base_url: "http://forge.local:3000".into(),
         webhook_secret: Some(SECRET.into()),
@@ -130,6 +131,36 @@ async fn accepts_signed_mention_and_runs_agent() {
             .unwrap()
             .contains("please do the thing")
     );
+}
+
+#[tokio::test]
+async fn unqualified_mention_uses_first_agent_in_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+    let payload = PAYLOAD.replace("@agent:custom", "@agent");
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(signed_request("issue_comment", &payload))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    for _ in 0..200 {
+        if harness.sessions.pending_jobs().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let session = harness
+        .sessions
+        .get("forgejo:shylock/forge-bot:issue:1")
+        .expect("session should exist");
+    assert_eq!(session.runs.len(), 1);
+    assert_eq!(session.runs[0].agent, "custom");
+    assert_eq!(session.runs[0].success, Some(true));
 }
 
 const REVIEW_PAYLOAD: &str = r#"{

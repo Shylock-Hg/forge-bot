@@ -19,8 +19,9 @@ pub struct Config {
     pub bind: String,
     /// Trigger string users mention, e.g. `@agent`.
     pub mention: String,
-    /// Agent used when the mention does not select one.
-    pub default_agent: String,
+    /// Agents to try in order. The first registered agent handles mentions
+    /// without an explicit selector; an empty list uses the built-in order.
+    pub agent_sequence: Vec<String>,
     /// Per-forge adapter configuration. Flattened so `[forgejo]`,
     /// `[github]` and `[gitlab]` are top-level tables.
     #[serde(flatten)]
@@ -45,7 +46,7 @@ impl Default for Config {
         Self {
             bind: "0.0.0.0:8080".to_owned(),
             mention: "@agent".to_owned(),
-            default_agent: "codex".to_owned(),
+            agent_sequence: Vec::new(),
             forges: Forges::default(),
             policy: PolicyConfig::default(),
             workspace: WorkspaceConfig::default(),
@@ -92,9 +93,6 @@ impl Config {
         if self.mention.is_empty() {
             self.mention = "@agent".to_owned();
         }
-        if self.default_agent.is_empty() {
-            self.default_agent = "codex".to_owned();
-        }
         self.policy.ensure_defaults();
         self.workspace.ensure_defaults();
         self.session.ensure_defaults();
@@ -119,9 +117,6 @@ impl Config {
         }
         if let Ok(v) = std::env::var("FORGE_BOT_MENTION") {
             self.mention = v;
-        }
-        if let Ok(v) = std::env::var("FORGE_BOT_DEFAULT_AGENT") {
-            self.default_agent = v;
         }
         if let Ok(v) = std::env::var("FORGE_BOT_MAX_CONCURRENCY")
             && let Ok(n) = v.parse()
@@ -414,7 +409,6 @@ impl SessionConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfigs {
-    pub default: String,
     /// Per-agent overrides. Flattened so `[agents.codex]` works in TOML.
     #[serde(flatten)]
     pub overrides: BTreeMap<String, AgentConfig>,
@@ -646,7 +640,7 @@ mod tests {
         config.apply_defaults();
         assert_eq!(config.bind, "0.0.0.0:8080");
         assert_eq!(config.mention, "@agent");
-        assert_eq!(config.default_agent, "codex");
+        assert!(config.agent_sequence.is_empty());
         assert_eq!(config.session.workers, 16);
         assert!(config.workspace.enabled);
         assert!(config.reply.ack);
@@ -660,11 +654,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_sequence() {
+        let config: Config =
+            toml::from_str("agent_sequence = [\"pi-rpc\", \"codex\", \"claude\"]\n").unwrap();
+        assert_eq!(config.agent_sequence, ["pi-rpc", "codex", "claude"]);
+    }
+
+    #[test]
     fn parses_toml() {
         let raw = r#"
 bind = "127.0.0.1:9000"
 mention = "@bot"
-default_agent = "pi"
+agent_sequence = ["pi", "codex"]
 
 [forgejo]
 base_url = "https://forge.example.com"
@@ -688,6 +689,7 @@ timeout_secs = 60
         let config: Config = toml::from_str(raw).unwrap();
         assert_eq!(config.bind, "127.0.0.1:9000");
         assert_eq!(config.mention, "@bot");
+        assert_eq!(config.agent_sequence, ["pi", "codex"]);
         let forgejo = config.forges.forgejo.unwrap();
         assert_eq!(forgejo.base_url, "https://forge.example.com");
         assert_eq!(config.agents.get("codex").unwrap().timeout_secs, Some(60));

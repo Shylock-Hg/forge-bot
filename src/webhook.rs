@@ -200,7 +200,7 @@ async fn receive(
             .agent
             .clone()
             .filter(|a| !a.is_empty())
-            .unwrap_or_else(|| state.config.default_agent.clone());
+            .unwrap_or_else(|| state.agents.default_name().to_owned());
 
         match state.dispatcher.submit(message, mention, &agent_name).await {
             Ok(job_id) => {

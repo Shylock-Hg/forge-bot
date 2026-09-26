@@ -5,12 +5,16 @@
 #
 #   FORGEJO_WEBHOOK_SECRET, FORGEJO_TOKEN, FORGEJO_BASE_URL,
 #   FORGEJO_BOT_USERNAME, FORGE_BOT_BIND, FORGE_BOT_MENTION,
-#   FORGE_BOT_DEFAULT_AGENT, FORGE_BOT_MAX_CONCURRENCY,
+#   FORGE_BOT_MAX_CONCURRENCY,
 #   FORGE_BOT_WORKSPACE_ROOT, FORGE_BOT_SESSION_DIR
 
 bind = "0.0.0.0:8080"
 mention = "@agent"
-default_agent = "codex"
+# Ordered agents for unqualified mentions and capacity fallback. When omitted,
+# the built-in order starts with codex. Use adapter names (`agy` for
+# Antigravity, `claude` for Claude Code).
+# Only listed agents are tried as fallbacks; explicit @agent:<name> still works.
+agent_sequence = ["codex", "pi-rpc", "agy", "claude"]
 
 [forgejo]
 base_url = "http://forgejo.example.com:3000"

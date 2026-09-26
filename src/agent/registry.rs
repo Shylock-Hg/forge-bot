@@ -4,9 +4,7 @@
 //! request. The built-ins (Codex, Antigravity, Pi, Claude Code, Kimi) are always
 //! available and can be overridden or extended from configuration.
 //!
-//! Codex is the first choice: it leads [`BUILTIN_AGENTS`], the fallback order
-//! returned by [`AgentRegistry::available_names`], and the default used when no
-//! configured default resolves to a registered adapter.
+//! Codex leads the built-in fallback order when no sequence is configured.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -30,6 +28,7 @@ pub const BUILTIN_AGENTS: &[&str] = &["codex", "agy", "pi-rpc", "pi", "claude", 
 pub struct AgentRegistry {
     agents: BTreeMap<String, Arc<dyn Agent>>,
     default: String,
+    sequence: Vec<String>,
     /// Agent name -> instant at which it may be tried again.
     unavailable: Mutex<HashMap<String, Instant>>,
 }
@@ -126,30 +125,48 @@ impl AgentRegistry {
             }
         }
 
-        let default = if agents.contains_key(&config.default_agent) {
-            config.default_agent.clone()
-        } else if !config.agents.default.is_empty() && agents.contains_key(&config.agents.default) {
-            config.agents.default.clone()
-        } else if agents.contains_key("codex") {
-            // Codex is the first choice even when the configured default is
-            // unknown: prefer it over the alphabetically first adapter.
-            "codex".to_owned()
-        } else {
-            agents
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "codex".to_owned())
+        let builtin_order = || {
+            let mut names: Vec<String> = BUILTIN_AGENTS
+                .iter()
+                .filter(|name| agents.contains_key(**name))
+                .map(|name| (*name).to_owned())
+                .collect();
+            names.extend(
+                agents
+                    .keys()
+                    .filter(|name| !BUILTIN_AGENTS.contains(&name.as_str()))
+                    .cloned(),
+            );
+            names
         };
+        let sequence = if config.agent_sequence.is_empty() {
+            builtin_order()
+        } else {
+            let mut sequence = Vec::new();
+            for name in &config.agent_sequence {
+                if !agents.contains_key(name) {
+                    tracing::warn!(agent = %name, "agent in sequence is not registered; skipping");
+                } else if !sequence.contains(name) {
+                    sequence.push(name.clone());
+                }
+            }
+            sequence
+        };
+
+        let default = sequence
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "codex".to_owned());
 
         Self {
             agents,
             default,
+            sequence,
             unavailable: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The configured default agent name.
+    /// The first registered agent in the configured or built-in sequence.
     pub fn default_name(&self) -> &str {
         &self.default
     }
@@ -228,11 +245,12 @@ impl AgentRegistry {
     }
 
     /// Names of the agents that are registered and not capacity-limited, in
-    /// preference order (see [`Self::names`]); codex is first when available.
+    /// configured sequence order, or built-in order when no sequence is set.
     pub fn available_names(&self) -> Vec<String> {
-        self.names()
-            .into_iter()
+        self.sequence
+            .iter()
             .filter(|name| self.is_available(name))
+            .cloned()
             .collect()
     }
 }
@@ -325,13 +343,25 @@ mod tests {
     }
 
     #[test]
-    fn unknown_default_falls_back_to_codex() {
+    fn configured_sequence_controls_default_and_fallback_order() {
         let config = Config {
-            default_agent: "does-not-exist".into(),
+            agent_sequence: vec![
+                "pi-rpc".into(),
+                "claude".into(),
+                "pi-rpc".into(),
+                "unknown".into(),
+                "pi".into(),
+            ],
             ..Default::default()
         };
         let registry = AgentRegistry::from_config(&config);
-        assert_eq!(registry.default_name(), "codex");
+        assert_eq!(registry.default_name(), "pi-rpc");
+        assert_eq!(registry.available_names(), ["pi-rpc", "claude"]);
+        // Other registered agents remain selectable explicitly.
+        assert!(registry.get("codex").is_ok());
+
+        registry.mark_unavailable("pi-rpc", Duration::from_secs(60));
+        assert_eq!(registry.available_names(), ["claude"]);
     }
 
     #[test]
